@@ -1,119 +1,171 @@
-// SOLMAR HEAT v3
-// Wanted system + police. Stars rise for crimes; police cars spawn at the
-// map edge and chase the player, ramming on foot or in a car. Lose them and
-// the heat cools off one star at a time. Get caught and you are BUSTED.
-import { WANTED, CITY_HALF } from './config.js';
-import { createCar } from './vehicles.js';
-import { resolveCollisions } from './city.js';
+// SOLMAR HEAT — the wanted system and the police who answer it.
+//
+// Stars go up when you shoot (one per shot) or steal a car, and fade one at
+// a time after 25 quiet seconds with no cruiser nearby. The number of
+// cruisers on the street always equals the star count: they spawn the
+// moment a star is earned, up to five, and despawn as stars fade. Cruisers
+// chase in the open — they cut across blocks, not just roads — ram your car
+// when they catch it, and bust you on foot if one sits on top of you for
+// just over a second.
 
-export function createWanted() {
-  return {
-    stars: 0,
-    heat: 0, // 0..1 progress toward the next star from repeated crimes
-    calmTimer: 0,
-    bustTimer: 0,
-    cops: [],
-    copId: 0,
-  };
-}
+import { COMBAT, WORLD, COLORS } from './config.js';
+import { clamp, angleDelta, dist2d } from './random.js';
+import { collideBuildings, randomRoadPoint } from './city.js';
+import { makeCar, carsOverlap, pushApart } from './vehicles.js';
+import { playerPos, onEvent } from './world.js';
+import { damagePlayer, bustPlayer } from './player.js';
 
-export function addWanted(wanted, stars, reason) {
+/** Add stars (capped at 5) and make sure the cruisers match. */
+export function addWanted(world, stars) {
+  const wanted = world.wanted;
   const before = wanted.stars;
-  wanted.stars = Math.min(WANTED.maxStars, wanted.stars + stars);
-  wanted.calmTimer = 0;
-  return { raised: wanted.stars > before, reason };
-}
-
-export function spawnCop(wanted, scene, x, z) {
-  const car = createCar(`cop-${wanted.copId}`, x, z, 0, 0xf5f5f5, { police: true });
-  wanted.copId += 1;
-  car.speed = 0;
-  scene.add(car.mesh);
-  wanted.cops.push(car);
-  return car;
-}
-
-function nearestCopDistance(wanted, px, pz) {
-  let best = Infinity;
-  for (const cop of wanted.cops) best = Math.min(best, Math.hypot(cop.x - px, cop.z - pz));
-  return best;
-}
-
-// Keep the number of active cops proportional to the wanted level.
-export function wantedStep(wanted, dt, scene, player, random) {
-  const px = player.x; const pz = player.z;
-  const wantCops = wanted.stars === 0 ? 0 : Math.min(WANTED.maxStars, 1 + wanted.stars);
-  while (wanted.cops.length < wantCops) {
-    const edge = Math.floor(random() * 4);
-    let x; let z;
-    if (edge === 0) { x = px + 90; z = pz + (random() - 0.5) * 120; }
-    else if (edge === 1) { x = px - 90; z = pz + (random() - 0.5) * 120; }
-    else if (edge === 2) { x = px + (random() - 0.5) * 120; z = pz + 90; }
-    else { x = px + (random() - 0.5) * 120; z = pz - 90; }
-    x = Math.max(-CITY_HALF, Math.min(CITY_HALF, x));
-    z = Math.max(-CITY_HALF, Math.min(CITY_HALF, z));
-    spawnCop(wanted, scene, x, z);
+  wanted.stars = Math.min(COMBAT.maxWanted, wanted.stars + stars);
+  wanted.lastCrimeAt = world.time;
+  if (wanted.stars !== before) {
+    syncCops(world);
+    onEvent(world, 'wanted', { stars: wanted.stars });
   }
-  while (wanted.cops.length > wantCops) {
-    const cop = wanted.cops.pop();
-    scene.remove(cop.mesh);
+}
+
+/** Spawn or remove cruisers until their count equals the star count. */
+export function syncCops(world) {
+  const wanted = world.wanted;
+  while (wanted.cops.length < wanted.stars) {
+    wanted.cops.push(spawnCop(world, wanted.cops.length));
+  }
+  while (wanted.cops.length > wanted.stars) {
+    wanted.cops.pop();
+  }
+}
+
+/** One cruiser, placed on a road 35–55 m from the player. */
+function spawnCop(world, n) {
+  const pos = playerPos(world);
+  let point = randomRoadPoint(world.rng);
+  let guard = 0;
+  while ((dist2d(point.x, point.z, pos.x, pos.z) < 35 || dist2d(point.x, point.z, pos.x, pos.z) > 55) && guard++ < 30) {
+    point = randomRoadPoint(world.rng);
+  }
+  return spawnCopAt(world, point.x, point.z, world.rng.range(0, Math.PI * 2), 12, n);
+}
+
+/** One cruiser at an exact spot (the staged shots place their own). */
+export function spawnCopAt(world, x, z, heading, speed, n) {
+  const cop = makeCar(`cop-${Date.now() % 100000}-${n ?? 0}`, 'cop', 'Cruiser', x, z, heading, COLORS.copCar, false);
+  cop.speed = speed;
+  cop.targetSpeed = COMBAT.copTopSpeed;
+  cop.ramCooldown = 0;
+  return cop;
+}
+
+/** Chase, ram, and bust logic, one step. */
+export function updatePolice(world, dt) {
+  const wanted = world.wanted;
+  const pos = playerPos(world);
+  const p = world.player;
+
+  // No stars, no cruisers: make sure none linger.
+  if (wanted.stars <= 0) {
+    if (wanted.cops.length > 0) wanted.cops.length = 0;
+    return;
   }
 
-  // Chase: steer toward the player, ram on contact.
+  // A cruiser that fell too far behind respawns closer (keeps pressure on).
+  for (let i = 0; i < wanted.cops.length; i++) {
+    const cop = wanted.cops[i];
+    if (dist2d(cop.x, cop.z, pos.x, pos.z) > 130) {
+      wanted.cops[i] = spawnCop(world, i);
+    }
+  }
+
+  // At four stars and up the police stop chasing only from behind: they
+  // throw a roadblock ahead of your direction of travel, so the escape
+  // route closes in front of you as well. The farthest cruiser is the one
+  // that gets moved — the ones already on your tail stay on your tail.
+  if (wanted.stars >= 4 && wanted.cops.length > 0) {
+    const heading = world.player.heading;
+    const aheadX = pos.x + Math.sin(heading) * 45;
+    const aheadZ = pos.z + Math.cos(heading) * 45;
+    const anyAhead = wanted.cops.some((cop) => {
+      const dx = cop.x - pos.x;
+      const dz = cop.z - pos.z;
+      const forward = dx * Math.sin(heading) + dz * Math.cos(heading);
+      return forward > 20 && dist2d(cop.x, cop.z, pos.x, pos.z) < 70;
+    });
+    if (!anyAhead) {
+      let far = wanted.cops[0];
+      let farD = -1;
+      for (const cop of wanted.cops) {
+        const d = dist2d(cop.x, cop.z, pos.x, pos.z);
+        if (d > farD) {
+          farD = d;
+          far = cop;
+        }
+      }
+      let point = randomRoadPoint(world.rng);
+      let guard = 0;
+      while (dist2d(point.x, point.z, aheadX, aheadZ) > 25 && guard++ < 20) {
+        point = randomRoadPoint(world.rng);
+      }
+      far.x = point.x;
+      far.z = point.z;
+      far.speed = 10;
+    }
+  }
+
   for (const cop of wanted.cops) {
-    const dx = px - cop.x; const dz = pz - cop.z;
-    const dist = Math.hypot(dx, dz);
+    if (cop.ramCooldown > 0) cop.ramCooldown -= dt;
+
+    // Steer towards the player: desired heading from the delta, turning at
+    // a fixed rate so cruisers swing wide instead of snapping around.
+    const dx = pos.x - cop.x;
+    const dz = pos.z - cop.z;
+    const dist = Math.sqrt(dx * dx + dz * dz) || 0.01;
     const desired = Math.atan2(dx, dz);
-    let diff = desired - cop.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    const targetSpeed = Math.min(26 + wanted.stars * 2, dist < 8 ? 18 : 30);
-    cop.speed += (targetSpeed - cop.speed) * Math.min(1, dt * 1.5);
-    cop.heading += Math.max(-1.9 * dt, Math.min(1.9 * dt, diff * 2.4 * dt * 3));
+    const turn = clamp(angleDelta(cop.heading, desired), -2.4 * dt, 2.4 * dt);
+    cop.heading += turn;
+
+    // Cruisers are fast, but they ease off when they are right on top of
+    // you so they ram instead of orbiting through you.
+    const wantSpeed = dist > 12 ? COMBAT.copTopSpeed : Math.max(6, COMBAT.copTopSpeed * 0.6);
+    cop.speed += clamp(wantSpeed - cop.speed, -10 * dt, 8 * dt);
+
     cop.x += Math.sin(cop.heading) * cop.speed * dt;
     cop.z += Math.cos(cop.heading) * cop.speed * dt;
-    cop.mesh.position.set(cop.x, 0, cop.z);
-    cop.mesh.rotation.y = cop.heading;
-    const spin = cop.speed * dt * 2.6;
-    for (const w of cop.wheels) w.rotation.x += spin;
-    // Flashing light bar.
-    if (cop.lightBar) {
-      const phase = Math.floor(performance.now() / 180) % 2 === 0;
-      cop.lightBar.red.material.emissive.setHex(phase ? 0xff0000 : 0x330000);
-      cop.lightBar.blue.material.emissive.setHex(phase ? 0x000033 : 0x0000ff);
+    const fixed = collideBuildings(world.city.buildings, cop.x, cop.z, 2.1);
+    if (fixed.hit) {
+      cop.x = fixed.x;
+      cop.z = fixed.z;
+      cop.speed *= 0.6;
+    }
+
+    // Do not stack cruisers on the same spot.
+    for (const other of wanted.cops) {
+      if (other === cop) continue;
+      if (carsOverlap(cop, other)) pushApart(cop, other, 0.5);
+    }
+
+    if (p.inCar) {
+      // Ramming: contact with your car hurts you, with a per-cruiser delay.
+      if (dist < 4.2 && cop.ramCooldown <= 0) {
+        cop.ramCooldown = 1;
+        cop.speed *= 0.6;
+        damagePlayer(world, COMBAT.copRamDamage, 'cop-ram');
+        onEvent(world, 'rammed', { cop: cop.id });
+      }
+      p.bustTimer = 0;
+    } else {
+      // On foot: a cruiser parked on you starts the bust clock.
+      if (dist < COMBAT.copBustRange) {
+        p.bustTimer += dt;
+        if (p.bustTimer >= COMBAT.copBustTime) {
+          p.bustTimer = 0;
+          bustPlayer(world);
+          return;
+        }
+      } else {
+        p.bustTimer = Math.max(0, p.bustTimer - dt * 2);
+      }
     }
   }
-
-  // Heat cools when no cop is near.
-  const near = nearestCopDistance(wanted, px, pz);
-  if (wanted.stars > 0 && near > 55) {
-    wanted.calmTimer += dt;
-    if (wanted.calmTimer > WANTED.decayDelay) {
-      wanted.stars -= 1;
-      wanted.calmTimer = 0;
-    }
-  } else {
-    wanted.calmTimer = 0;
-  }
-
-  // Busted: a cop sits on the player on foot.
-  let busted = false;
-  if (!player.inCar && wanted.stars > 0 && near < WANTED.bustDistance) {
-    wanted.bustTimer += dt;
-    if (wanted.bustTimer > WANTED.bustTime) busted = true;
-  } else {
-    wanted.bustTimer = 0;
-  }
-  return { busted, nearestCop: near };
-}
-
-// A police ram / hard hit on the player's car.
-export function copRamDamage(wanted, playerCar, dt) {
-  if (!playerCar) return 0;
-  let damage = 0;
-  for (const cop of wanted.cops) {
-    const d = Math.hypot(cop.x - playerCar.x, cop.z - playerCar.z);
-    if (d < 3.2 && Math.abs(cop.speed) > 8) damage += 14 * dt;
-  }
-  return damage;
 }

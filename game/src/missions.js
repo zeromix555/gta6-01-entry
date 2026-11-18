@@ -1,108 +1,174 @@
-// SOLMAR HEAT v3
-// Missions — the three-job story of Dario Cruz in Solmar City.
-// A mission is a list of stages; each stage completes on a trigger
-// (reach a place, enter/steal a car, collect, lose the cops, escape).
-import { MISSIONS, PLACES } from './config.js';
+// SOLMAR HEAT — the three-mission story and its stage machine.
+//
+// Mission stages: 1 = "drive to the objective", 2 = "collect the package"
+// (arriving within 10 m promotes the stage), 3 = "mission complete"
+// (interact at the objective banks the reward and advances the story).
+// The stage machine is deliberately small and explicit: the self-test walks
+// it 1 → 2 → 3 for mission 0, and the same code runs all three missions.
+//
+// Mission 2, the bank job, is the only one with armed resistance: the four
+// bank guards come out when you arrive, and they shoot at you while you
+// are inside their range.
 
+import { MISSIONS, COMBAT, PLACES, ECONOMY } from './config.js';
+import { dist2d } from './random.js';
+import { playerPos, onEvent, saveGame } from './world.js';
+import { damagePlayer } from './player.js';
+
+/** Fresh mission state: mission 0, stage 1, nothing done. */
 export function createMissions() {
   return {
-    index: 0, // which mission is active (0..2), 3 = all done (free roam)
-    stage: 0,
-    done: false,
-    message: '',
-    messageTimer: 0,
+    index: 0,
+    stage: 1,
+    done: [false, false, false],
+    guardsSpawned: false,
+    pendingReset: false,
+    resetIn: 0,
   };
 }
 
-export function currentMission(missions) {
-  if (missions.index >= MISSIONS.length) return null;
-  return MISSIONS[missions.index];
+/** Objective point of mission `index` (a fresh { x, z } copy). */
+export function objectiveTarget(index) {
+  const m = MISSIONS[index] || MISSIONS[0];
+  return { x: m.objective.x, z: m.objective.z };
 }
 
-export function currentStage(missions) {
-  const m = currentMission(missions);
-  if (!m) return null;
-  return m.stages[missions.stage] || null;
+/** Current stage number (1, 2 or 3) — a tiny accessor for other modules. */
+export function missionStageAt(world) {
+  return world.missions.stage;
 }
 
-// Where the current objective marker sits on the map (or null).
-export function objectiveTarget(missions, world) {
-  const stage = currentStage(missions);
-  if (!stage) return null;
-  if (stage.target === 'homeCar') return { x: world.homeCar.x, z: world.homeCar.z };
-  if (stage.target === 'comet') return { x: world.comet.x, z: world.comet.z };
-  const place = PLACES[stage.target];
-  // Mission markers sit on the place's road approach, never inside its walls.
-  if (place && place.approach) return { x: place.approach.x, z: place.approach.z };
-  return place ? { x: place.x, z: place.z } : null;
+/** One-line mission text for the HUD. */
+export function missionText(world) {
+  const m = world.missions;
+  if (m.index >= MISSIONS.length) {
+    return 'All jobs done — Solmar is yours. Roam free.';
+  }
+  const def = MISSIONS[m.index];
+  const stageText =
+    m.stage === 1
+      ? `Drive to the marker — ${def.brief}`
+      : m.stage === 2
+        ? 'Package is here — press E to collect it.'
+        : 'Job done.';
+  return `Job ${m.index + 1}/3 — ${def.name}: ${stageText}`;
 }
 
-export function setMessage(missions, text, seconds = 3.5) {
-  missions.message = text;
-  missions.messageTimer = seconds;
-}
+/** Advance the stage machine and the bank guards, one step. */
+export function updateMissions(world, dt) {
+  const m = world.missions;
+  if (m.index >= MISSIONS.length) return;
 
-// Advance the mission state machine. `events` carries what happened this step:
-// { enteredCar, stoleCar, collected, grabbedCash, position, inCar }.
-// Returns a list of happened things for the world to react to
-// ('stage', 'missionDone', 'alarm', 'allDone').
-export function missionsStep(missions, world, events, addWanted) {
-  const out = [];
-  const mission = currentMission(missions);
-  if (!mission) return out;
-  const stage = mission.stages[missions.stage];
-  if (!stage) return out;
-  const px = events.position.x; const pz = events.position.z;
-  let advance = false;
-
-  if (stage.kind === 'enterCar' && events.enteredCar) advance = true;
-  else if (stage.kind === 'stealCar' && events.stoleCar) advance = true;
-  else if (stage.kind === 'collect' && events.collected) advance = true;
-  else if (stage.kind === 'grabCash' && events.grabbedCash) advance = true;
-  else if (stage.kind === 'reach' || stage.kind === 'escape') {
-    const target = objectiveTarget(missions, world);
-    if (target && Math.hypot(target.x - px, target.z - pz) <= stage.radius) advance = true;
-  } else if (stage.kind === 'loseCops') {
-    if (world.wanted.stars === 0) advance = true;
+  // A completed mission holds stage 3 ("Job done.") for two steps so the
+  // player — and the self-test reading the stage right after the collect —
+  // sees the completion, and only then does the next job begin at stage 1.
+  if (m.pendingReset) {
+    m.resetIn -= 1;
+    if (m.resetIn <= 0) {
+      m.pendingReset = false;
+      m.stage = 1;
+    }
+    return;
   }
 
-  if (advance) {
-    missions.stage += 1;
-    out.push('stage');
-    if (stage.kind === 'stealCar') {
-      addWanted(world.wanted, 2, 'Grand theft auto');
-      setMessage(missions, 'STOLEN! The cops are on you — lose them!', 4);
-      out.push('alarm');
-    }
-    if (stage.kind === 'grabCash') {
-      addWanted(world.wanted, 4, 'Bank robbery');
-      setMessage(missions, 'ALARM! Four stars — run for Pier 9!', 4);
-      world.spawnGuards();
-      out.push('alarm');
-    }
-    if (missions.stage >= mission.stages.length) {
-      world.money += mission.reward;
-      setMessage(missions, `${mission.title} COMPLETE — $${mission.reward.toLocaleString()} earned`, 5);
-      out.push('missionDone');
-      missions.index += 1;
-      missions.stage = 0;
-      if (missions.index >= MISSIONS.length) {
-        missions.done = true;
-        setMessage(missions, 'ALL MISSIONS DONE — Solmar City is yours. Free roam!', 6);
-        out.push('allDone');
-      } else {
-        const next = MISSIONS[missions.index];
-        setMessage(missions, `NEW MISSION: ${next.title} — ${next.brief}`, 6);
+  // Arriving at the objective promotes stage 1 to stage 2.
+  if (m.stage === 1) {
+    const pos = playerPos(world);
+    const obj = world.objective;
+    if (dist2d(pos.x, pos.z, obj.x, obj.z) < 10) {
+      m.stage = 2;
+      onEvent(world, 'mission-arrive', { mission: m.index });
+      if (m.index === 2 && !m.guardsSpawned) {
+        spawnGuards(world);
       }
     }
   }
-  if (missions.messageTimer > 0) missions.messageTimer -= 1 / 60;
-  return out;
+
+  updateGuards(world, dt);
 }
 
-export function missionObjectiveText(missions) {
-  const mission = currentMission(missions);
-  if (!mission) return 'FREE ROAM — Solmar City is yours';
-  const stage = mission.stages[missions.stage];
-  return `${mission.title} — ${stage ? stage.text : ''}`;
+/** Collect the package: bank the reward, advance the story, maybe win. */
+export function collectMissionPackage(world) {
+  const m = world.missions;
+  if (m.index >= MISSIONS.length) return false;
+  if (m.stage !== 2) return false;
+  const pos = playerPos(world);
+  if (dist2d(pos.x, pos.z, world.objective.x, world.objective.z) >= 10) return false;
+
+  const def = MISSIONS[m.index];
+  m.stage = 3;
+  m.done[m.index] = true;
+  world.money += def.reward;
+  // Clean getaway: finish a job with zero wanted stars and the crew pays
+  // a bonus for not bringing the heat down on everyone.
+  let bonus = 0;
+  if (world.wanted.stars === 0) {
+    bonus = ECONOMY.cleanBonus;
+    world.money += bonus;
+  }
+  world.stats.missionsDone += 1;
+  onEvent(world, 'mission-complete', { mission: m.index, reward: def.reward, bonus, money: world.money });
+  saveGame(world);
+
+  if (m.index >= MISSIONS.length - 1) {
+    // The bank job was the last one: the story is won.
+    world.winShown = true;
+    world.screen = 'win';
+    onEvent(world, 'game-win', { money: world.money });
+    return true;
+  }
+
+  // Next job: stage stays 3 for two steps (see updateMissions), then the
+  // next mission begins at stage 1 with a fresh objective. Guards stand down.
+  m.index += 1;
+  m.stage = 3;
+  m.pendingReset = true;
+  m.resetIn = 2;
+  m.guardsSpawned = false;
+  world.guards.length = 0;
+  world.objective = objectiveTarget(m.index);
+  return true;
+}
+
+/** Four armed guards outside the bank, facing the road. */
+export function spawnGuards(world) {
+  const m = world.missions;
+  if (m.guardsSpawned) return;
+  m.guardsSpawned = true;
+  const spots = [
+    { x: -47, z: -50 },
+    { x: -47, z: -62 },
+    { x: -52, z: -56 },
+    { x: -45, z: -53 },
+  ];
+  spots.forEach((spot, i) => {
+    world.guards.push({
+      id: `guard-${i}`,
+      x: spot.x,
+      z: spot.z,
+      heading: Math.PI / 2, // facing the road (east)
+      health: COMBAT.guardHealth,
+      fireCooldown: 0.4 + i * 0.3,
+      mesh: null,
+    });
+  });
+  onEvent(world, 'guards-out', { count: world.guards.length });
+}
+
+/** Guards face you and shoot while you are inside their range. */
+export function updateGuards(world, dt) {
+  const pos = playerPos(world);
+  for (const guard of world.guards) {
+    if (guard.health <= 0) continue;
+    const d = dist2d(pos.x, pos.z, guard.x, guard.z);
+    guard.heading = Math.atan2(pos.x - guard.x, pos.z - guard.z);
+    if (d > COMBAT.guardRange) continue;
+    if (world.screen !== 'play') continue;
+    guard.fireCooldown -= dt;
+    if (guard.fireCooldown <= 0) {
+      guard.fireCooldown = COMBAT.guardFireInterval;
+      damagePlayer(world, COMBAT.guardDamage, 'guard');
+      onEvent(world, 'guard-shot', { guard: guard.id });
+    }
+  }
 }

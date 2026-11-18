@@ -1,80 +1,117 @@
-// SOLMAR HEAT v3
-// Pedestrians — sidewalk walkers who stroll the blocks, cross at corners,
-// and flee when the player speeds at them or fires a shot.
-import { ROAD_HALF, BLOCK, GRID, CITY_HALF } from './config.js';
-import { pick, range } from './random.js';
+// SOLMAR HEAT — pedestrians: the city walking around you.
+//
+// Pedestrians amble along the sidewalks, change direction at random, and
+// turn away from walls instead of walking through them. A gunshot nearby
+// sends them running: they sprint away from the sound for a few seconds,
+// then settle back to a walk. One caught in your line of fire goes down
+// for a while and later gets back up somewhere else in town — nobody stays
+// down forever, and nobody is ever more than set dressing with a heartbeat.
 
-const SHIRTS = [0xe74c3c, 0x3498db, 0xf1c40f, 0x2ecc71, 0x9b59b6, 0xecf0f1, 0xe67e22, 0x1abc9c];
-const SKINS = [0xf1c27d, 0xe0ac69, 0x8d5524, 0xffdbac, 0xc68642];
+import { PEDS, WORLD } from './config.js';
+import { clamp, dist2d } from './random.js';
+import { collideBuildings, randomRoadPoint, isOnRoad } from './city.js';
+import { playerPos } from './world.js';
 
-export function makePedMesh(shirt, skin) {
-  const group = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.85, 0.32),
-    new THREE.MeshLambertMaterial({ color: shirt }));
-  body.position.y = 0.95; body.castShadow = true;
-  group.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8),
-    new THREE.MeshLambertMaterial({ color: skin }));
-  head.position.y = 1.6; head.castShadow = true;
-  group.add(head);
-  const legMat = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.55, 0.2), legMat);
-  legL.position.set(-0.14, 0.28, 0); group.add(legL);
-  const legR = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.55, 0.2), legMat);
-  legR.position.set(0.14, 0.28, 0); group.add(legR);
-  return { group, legL, legR };
+/** Build one pedestrian on a sidewalk, clear of the player and the roads. */
+export function makePed(rng, buildings, id) {
+  // Pick a road point, then step off the road onto the sidewalk beside it.
+  const point = randomRoadPoint(rng);
+  const onAvenue = Math.abs(point.x - Math.round(point.x / 40) * 40) < Math.abs(point.z - Math.round(point.z / 40) * 40);
+  const side = rng.chance(0.5) ? 1 : -1;
+  const x = onAvenue ? point.x + side * rng.range(8, 10) : point.x;
+  const z = onAvenue ? point.z : point.z + side * rng.range(8, 10);
+  const palette = [0xc96a3a, 0x3a6ac9, 0x7a3ac9, 0x3ac96a, 0xc9b83a, 0x888888];
+  return {
+    id: `ped-${id}`,
+    x: clamp(x, -WORLD.bound, WORLD.bound),
+    z: clamp(z, -WORLD.bound, WORLD.bound),
+    heading: rng.range(0, Math.PI * 2),
+    speed: rng.range(1.0, 1.8),
+    state: 'walk', // 'walk' | 'flee' | 'down'
+    fleeTimer: 0,
+    downTimer: 0,
+    color: rng.pick(palette),
+    mesh: null,
+    stepPhase: rng.range(0, Math.PI * 2),
+  };
 }
 
-export function spawnPedestrians(random, count) {
-  const peds = [];
-  for (let i = 0; i < count; i += 1) {
-    const mesh = makePedMesh(pick(random, SHIRTS), pick(random, SKINS));
-    const x = range(random, -CITY_HALF, CITY_HALF);
-    const z = range(random, -CITY_HALF, CITY_HALF);
-    mesh.group.position.set(x, 0, z);
-    peds.push({
-      id: `ped-${i}`, x, z,
-      heading: range(random, 0, Math.PI * 2),
-      speed: range(random, 1.0, 1.8),
-      mesh: mesh.group, legL: mesh.legL, legR: mesh.legR,
-      flee: 0, target: null, walkPhase: random() * 6,
-    });
-  }
-  return peds;
-}
+/** Advance every pedestrian one step. */
+export function updatePedestrians(world, dt) {
+  const pos = playerPos(world);
+  const rng = world.rng;
 
-export function pedStep(ped, dt, random, playerPos, danger) {
-  // Flee from danger (a speeding car or a gunshot near the player).
-  if (danger) {
-    const d = Math.hypot(ped.x - playerPos.x, ped.z - playerPos.z);
-    if (d < 14) ped.flee = 2.5;
-  }
-  if (ped.flee > 0) {
-    ped.flee -= dt;
-    const away = Math.atan2(ped.x - playerPos.x, ped.z - playerPos.z);
-    ped.heading = away;
-    ped.speed = 4.2;
-  } else {
-    ped.speed = 1.4;
-    if (!ped.target || Math.hypot(ped.target.x - ped.x, ped.target.z - ped.z) < 3) {
-      // New stroll target: a nearby sidewalk corner.
-      const rx = Math.round(ped.x / BLOCK) * BLOCK + (random() < 0.5 ? ROAD_HALF + 2 : -ROAD_HALF - 2);
-      const rz = Math.round(ped.z / BLOCK) * BLOCK + (random() < 0.5 ? ROAD_HALF + 2 : -ROAD_HALF - 2);
-      ped.target = { x: Math.max(-CITY_HALF, Math.min(CITY_HALF, rx)), z: Math.max(-CITY_HALF, Math.min(CITY_HALF, rz)) };
+  // A shot in the last half-second, close by, scares the neighbourhood.
+  let recentShot = null;
+  for (let i = world.events.length - 1; i >= 0; i--) {
+    const ev = world.events[i];
+    if (ev.name === 'shot' && world.time - ev.t < 0.5) {
+      recentShot = ev.detail;
+      break;
     }
-    const desired = Math.atan2(ped.target.x - ped.x, ped.target.z - ped.z);
-    let diff = desired - ped.heading;
-    while (diff > Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    ped.heading += Math.max(-2.5 * dt, Math.min(2.5 * dt, diff));
+    if (world.time - ev.t > 0.5) break;
   }
-  ped.x += Math.sin(ped.heading) * ped.speed * dt;
-  ped.z += Math.cos(ped.heading) * ped.speed * dt;
-  ped.x = Math.max(-CITY_HALF - 8, Math.min(CITY_HALF + 8, ped.x));
-  ped.z = Math.max(-CITY_HALF - 8, Math.min(CITY_HALF + 8, ped.z));
-  ped.walkPhase += dt * ped.speed * 3;
-  ped.mesh.position.set(ped.x, 0, ped.z);
-  ped.mesh.rotation.y = ped.heading;
-  ped.legL.rotation.x = Math.sin(ped.walkPhase) * 0.5;
-  ped.legR.rotation.x = -Math.sin(ped.walkPhase) * 0.5;
+
+  for (const ped of world.pedestrians) {
+    if (ped.state === 'down') {
+      ped.downTimer -= dt;
+      if (ped.downTimer <= 0) {
+        // Get up somewhere else in town, clear of the player.
+        const fresh = makePed(rng, world.city.buildings, ped.id.replace('ped-', ''));
+        ped.x = fresh.x;
+        ped.z = fresh.z;
+        ped.heading = fresh.heading;
+        ped.state = 'walk';
+        ped.fleeTimer = 0;
+      }
+      continue;
+    }
+
+    if (recentShot && dist2d(ped.x, ped.z, recentShot.x, recentShot.z) < PEDS.fleeRadius) {
+      ped.state = 'flee';
+      ped.fleeTimer = 3;
+      // Run directly away from the shot.
+      ped.heading = Math.atan2(ped.x - recentShot.x, ped.z - recentShot.z);
+    }
+
+    // A car bearing down on you gets a sidestep: pedestrians jump clear of
+    // the lane instead of trusting the driver to stop.
+    if (world.player.inCar && world.player.car) {
+      const car = world.player.car;
+      const dCar = dist2d(ped.x, ped.z, car.x, car.z);
+      if (dCar < 7 && Math.abs(car.speed) > 3) {
+        const side =
+          (ped.x - car.x) * Math.cos(car.heading) - (ped.z - car.z) * Math.sin(car.heading) >= 0 ? 1 : -1;
+        ped.heading = car.heading + side * (Math.PI / 2);
+        ped.state = 'flee';
+        ped.fleeTimer = 1.2;
+      }
+    }
+
+    if (ped.state === 'flee') {
+      ped.fleeTimer -= dt;
+      if (ped.fleeTimer <= 0) ped.state = 'walk';
+    }
+
+    const speed = ped.state === 'flee' ? PEDS.fleeSpeed : ped.speed;
+
+    // Amblers change their mind at random; the fleeing keep a straight line.
+    if (ped.state === 'walk' && rng.chance(0.004)) {
+      ped.heading = rng.range(0, Math.PI * 2);
+    }
+
+    const nx = ped.x + Math.sin(ped.heading) * speed * dt;
+    const nz = ped.z + Math.cos(ped.heading) * speed * dt;
+    const fixed = collideBuildings(world.city.buildings, nx, nz, 0.5);
+    if (fixed.hit) {
+      // A wall means turn around instead of getting stuck on it.
+      ped.heading += Math.PI / 2 + rng.range(-0.4, 0.4);
+    } else {
+      ped.x = fixed.x;
+      ped.z = fixed.z;
+    }
+    ped.x = clamp(ped.x, -WORLD.bound, WORLD.bound);
+    ped.z = clamp(ped.z, -WORLD.bound, WORLD.bound);
+    ped.stepPhase += dt * speed * 3.2;
+  }
 }

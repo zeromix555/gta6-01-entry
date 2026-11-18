@@ -1,1 +1,17 @@
+# Build output from the hand-in program (MAKEFUN_OUTPUT_DIR=out node main.ts)
 out/
+# Dependencies (none at runtime, but never commit them if added)
+node_modules/
+# macOS metadata
+.DS_Store
+# Logs
+*.log
+# Temporary files
+*.tmp
+# Local scratch
+tmp/
+# Test coverage output
+coverage/
+# Editor swap files
+*.swp
+*.swo

@@ -1,121 +1,192 @@
-// SOLMAR HEAT v3
-// SOLMAR HEAT — configuration and world data.
-// Original sun-soaked coastal city "Solmar City", original characters and story.
-// Nothing here comes from any commercial game.
+// SOLMAR HEAT — tuning constants and fixed world data.
+//
+// Everything tunable lives here so the rest of the game reads like rules,
+// not magic numbers. Coordinates use a flat XZ plane: +X is east, +Z is
+// south, and heading 0 faces +Z (south). Heading Math.PI faces -Z (north),
+// which is the direction the home sedan points at spawn.
+//
+// The city is a 5x5 road grid. Roads sit at multiples of 40 m; the central
+// avenue (x = 0) is wider than the side streets. Buildings live inside the
+// blocks between roads, never on a road, so a car driving straight down an
+// avenue never meets a wall.
+
 export const STEP = 1 / 60;
-export const SAVE_KEY = 'solmar-heat-save-v1';
-export const BEST_KEY = 'solmar-heat-best-v1';
 
-// City grid: roads run at multiples of BLOCK, blocks sit between them.
-export const BLOCK = 58;
-export const ROAD_HALF = 7;
-export const GRID = 3; // road indices -3..3, city spans about +/-203 m
-export const CITY_HALF = GRID * BLOCK + ROAD_HALF; // 181
-export const BEACH_X = 205; // sand + sea east of the city
+// ---------------------------------------------------------------------------
+// World geometry
+// ---------------------------------------------------------------------------
+export const WORLD = {
+  bound: 105, // soft edge of the drivable city; cars and walkers clamp here
+  groundSize: 420, // visual ground plane, larger than the bound
+  roadCoords: [-80, -40, 0, 40, 80], // avenues (x) and streets (z)
+  roadWidth: 12, // side streets
+  avenueWidth: 16, // central avenue x = 0
+  laneOffsetStreet: 3, // traffic lane centre from a street centre line
+  laneOffsetAvenue: 5, // traffic lane centre from the avenue centre line
+  blockMargin: 8, // buildings keep this far inside a block edge
+};
 
+// ---------------------------------------------------------------------------
+// Player (on foot)
+// ---------------------------------------------------------------------------
 export const PLAYER = {
-  walkSpeed: 5.2,
-  runSpeed: 8.4,
-  radius: 0.55,
-  healthMax: 100,
-  pistolMag: 12,
-  pistolDamage: 34,
-  pistolRange: 55,
-  fireInterval: 0.22,
+  walkSpeed: 5, // m/s, plain walking
+  runSpeed: 7.5, // m/s while holding Shift
+  turnSpeed: 2.6, // rad/s, A/D turn the body
+  radius: 0.6, // collision circle
+  maxHealth: 100,
+  interactRange: 5.5, // metres: car entry, package pickup
+  hurtCooldown: 0.6, // seconds between damage ticks
 };
 
+// ---------------------------------------------------------------------------
+// Cars
+// ---------------------------------------------------------------------------
 export const CAR = {
-  accel: 22,
-  brake: 34,
-  reverseAccel: 12,
-  maxSpeed: 38,
-  maxReverse: 10,
-  steerMax: 0.55,
-  grip: 6.5,
-  healthMax: 100,
+  accel: 14, // m/s^2 at full throttle
+  brake: 26, // m/s^2 braking / reversing against motion
+  reverseAccel: 8, // m/s^2 when reversing from a standstill
+  maxSpeed: 30, // m/s forward (~108 km/h, arcade)
+  maxReverse: 10, // m/s backwards
+  sportMaxSpeed: 38, // the Falco GT is meaningfully faster
+  turnRate: 1.9, // rad/s at full lock and low speed
+  drag: 0.35, // per-second speed decay while coasting
+  radius: 2.1, // collision circle for car-vs-car and car-vs-wall
 };
 
-export const WANTED = {
-  maxStars: 5,
-  decayDelay: 7, // seconds with no cop near before a star drops
-  bustDistance: 2.4,
-  bustTime: 1.6,
-  copChaseRange: 120,
+// ---------------------------------------------------------------------------
+// Traffic and pedestrians
+// ---------------------------------------------------------------------------
+export const TRAFFIC = {
+  count: 10,
+  minSpeed: 7,
+  maxSpeed: 12,
+  turnChance: 0.008, // per step, while inside an intersection
+  avoidDistance: 12, // slow down for a stopped car this far ahead
 };
 
-// Traffic / crowd counts (kept modest so headless SwiftShader stays smooth).
-export const TRAFFIC_CARS = 14;
-export const PEDESTRIANS = 22;
-export const MAX_COPS = 6;
+export const PEDS = {
+  count: 14,
+  walkSpeed: 1.4,
+  fleeSpeed: 5.5,
+  fleeRadius: 25, // a gunshot this close makes nearby peds run
+};
 
-// Named places in Solmar City (all invented). Each place with a building has
-// an `approach` point on the nearest road — that is where missions point,
-// so a car can always drive up to it and a player on foot can reach its door.
+// ---------------------------------------------------------------------------
+// Combat and the wanted system
+// ---------------------------------------------------------------------------
+export const COMBAT = {
+  magSize: 12, // pistol magazine
+  reserveMax: 120, // spare rounds
+  startReserve: 96,
+  fireInterval: 0.1, // seconds between shots (10 shots/s)
+  shotRange: 40, // metres a shot can hit a guard
+  shotHalfAngle: 0.35, // radians off aim a guard may be and still be hit
+  shotWanted: 1, // stars added per shot fired
+  maxWanted: 5,
+  stealWanted: 1, // stars added for stealing a car that is not yours
+  copTopSpeed: 17, // police cruisers are faster than traffic, slower than you
+  copRamDamage: 4, // health lost when a cruiser rams your car
+  copBustRange: 3, // metres: a cruiser this close to you on foot starts a bust
+  copBustTime: 1.2, // seconds inside bust range before you are busted
+  guardHealth: 3, // pistol hits a bank guard can take
+  guardDamage: 6, // health a guard shot costs you
+  guardRange: 22, // metres at which guards open fire
+  guardFireInterval: 1.1, // seconds between guard shots
+  wantedDecaySeconds: 25, // one star fades after this long with no crime
+};
+
+// ---------------------------------------------------------------------------
+// Money, missions and save data
+// ---------------------------------------------------------------------------
+export const ECONOMY = {
+  startMoney: 250,
+  bustedLoss: 0.1, // busted: lose 10% of your cash
+  cleanBonus: 100, // finishing a job with zero wanted stars pays a bonus
+};
+
+// ---------------------------------------------------------------------------
+// Chase camera and the car horn
+// ---------------------------------------------------------------------------
+export const CAMERA = {
+  chaseDistCar: 11, // metres behind the car
+  chaseHeightCar: 4.6,
+  chaseDistFoot: 7.5, // metres behind the player on foot
+  chaseHeightFoot: 3.4,
+  lookAhead: 4, // metres in front of the player the camera aims at
+};
+
+export const HORN = {
+  range: 18, // metres: traffic inside this hears the horn
+  slowSpeed: 4, // m/s: startled traffic slows to this
+  duration: 1.2, // seconds the startle lasts
+};
+
+export const SAVE_KEY = 'solmar-heat-save-v1';
+export const BEST_KEY = 'solmar-heat-best';
+
+// Fixed places. Every objective sits ON a road so it is drivable, and every
+// landmark building sits inside a block facing its road.
 export const PLACES = {
-  diner: { x: -40, z: -100, approach: { x: -54.5, z: -100 }, name: "Maribel's Diner" },
-  docks: { x: 174, z: 174, approach: { x: 174, z: 174 }, name: 'Solmar Docks' },
-  showroom: { x: 145, z: -29, approach: { x: 120, z: -29 }, name: 'Solmar Motors' },
-  chopShop: { x: -145, z: 145, approach: { x: -170, z: 145 }, name: "Rico's Chop Shop" },
-  bank: { x: 29, z: 87, approach: { x: 4, z: 87 }, name: 'Solmar Trust Bank' },
-  hideout: { x: -116, z: 174, approach: { x: -116, z: 174 }, name: 'Hideout — Pier 9' },
-  hospital: { x: 58, z: 174, approach: { x: 58, z: 174 }, name: 'Solmar General' },
-  home: { x: -29, z: -29, name: "Dario's Apartment" },
+  spawn: { x: 2, z: 0, heading: Math.PI },
+  homeCar: { x: 2.5, z: 4, heading: Math.PI },
+  sportsCar: { x: -7.2, z: -60, heading: Math.PI },
+  diner: { x: 44, z: -56 }, // mission 0 objective: the approach point
+  dinerBuilding: { x: 58, z: -56 },
+  hospital: { x: -44, z: 56 }, // busted respawn point
+  hospitalBuilding: { x: -58, z: 56 },
+  bank: { x: -44, z: -56 }, // mission 2 objective
+  bankBuilding: { x: -58, z: -56 },
+  harbor: { x: 80, z: 76 }, // mission 1 objective
 };
 
-// Mission definitions: each stage has a kind, a target and HUD text.
+// The three-mission story. Stage 1 is "drive to the objective", stage 2 is
+// "collect the package" (arriving within 10 m promotes the stage), stage 3
+// is "mission complete" (interact at the objective collects it).
 export const MISSIONS = [
   {
-    id: 'm1',
-    title: 'MISSION 1 — FIRST FARE',
-    brief:
-      "Dario owes Maribel $500. She has a package job: pick it up at her diner and run it to the docks. Your sedan is parked outside your apartment.",
+    name: 'The Marisol Pickup',
+    brief: 'Drive to the Marisol Diner and collect the package.',
+    objective: { x: 44, z: -56 },
     reward: 500,
-    stages: [
-      { kind: 'enterCar', target: 'homeCar', text: 'Get in your sedan (E)' },
-      { kind: 'reach', target: 'diner', radius: 10, text: "Drive to Maribel's Diner" },
-      { kind: 'collect', target: 'diner', radius: 6, text: 'Pick up the package — walk to the door (E)' },
-      { kind: 'reach', target: 'docks', radius: 11, text: 'Deliver the package to the Solmar Docks' },
-    ],
   },
   {
-    id: 'm2',
-    title: 'MISSION 2 — HOT WHEELS',
-    brief:
-      "A buyer at Rico's Chop Shop wants the Comet GT from Solmar Motors — tonight. Steal it, lose the cops, bring it in. Stealing in front of the law draws heat.",
-    reward: 1200,
-    stages: [
-      { kind: 'reach', target: 'showroom', radius: 12, text: 'Go to Solmar Motors showroom' },
-      { kind: 'stealCar', target: 'comet', text: 'Steal the Comet GT (E)' },
-      { kind: 'loseCops', text: 'Lose the cops — get your wanted level to zero' },
-      { kind: 'reach', target: 'chopShop', radius: 11, text: "Deliver the Comet GT to Rico's Chop Shop" },
-    ],
+    name: 'Harbor Handoff',
+    brief: 'Take the package to the old harbor crane at the east docks.',
+    objective: { x: 80, z: 76 },
+    reward: 1500,
   },
   {
-    id: 'm3',
-    title: 'MISSION 3 — THE GETAWAY',
-    brief:
-      "The big one: Solmar Trust Bank. Grab the cash, fight your way out past the guards, and outrun a four-star response to the Pier 9 hideout. Good luck, Dario.",
-    reward: 3000,
-    stages: [
-      { kind: 'reach', target: 'bank', radius: 12, text: 'Go to Solmar Trust Bank' },
-      { kind: 'grabCash', target: 'bank', radius: 6, text: 'Grab the cash (E) — expect trouble' },
-      { kind: 'escape', target: 'hideout', radius: 12, text: 'Escape to the Pier 9 hideout — wanted level 4!' },
-    ],
+    name: 'The Solmar Bank Job',
+    brief: 'Hit the Solmar National Bank. Guards are armed. Grab the vault cash.',
+    objective: { x: -44, z: -56 },
+    reward: 5000,
   },
 ];
 
-// Cash pickups scattered around the city (free-roam side activity).
-export const CASH_DROPS = [
-  { x: -145, z: -145, amount: 100 },
-  { x: 145, z: -145, amount: 100 },
-  { x: -145, z: 29, amount: 150 },
-  { x: 87, z: 145, amount: 150 },
-  { x: 29, z: -174, amount: 100 },
-  { x: -87, z: 87, amount: 200 },
-];
+// ---------------------------------------------------------------------------
+// Presentation
+// ---------------------------------------------------------------------------
+export const COLORS = {
+  sky: 0x87b5d6,
+  fog: 0x9db8c8,
+  ground: 0x3d4a3a,
+  sidewalk: 0x8a8d90,
+  road: 0x2c2f33,
+  roadLine: 0xd8c95a,
+  buildingPalette: [0x7d8aa0, 0x9a8a7a, 0x6a7d8a, 0xa08a6a, 0x8a7d9a, 0x5f7080],
+  homeCar: 0x3a7bd5,
+  sportsCar: 0xc0392b,
+  trafficPalette: [0xd8d8d8, 0x303030, 0x2e6b34, 0xb0a030, 0x703090, 0x808890],
+  copCar: 0x1a1a2e,
+  copLightRed: 0xff2020,
+  copLightBlue: 0x2080ff,
+  playerJacket: 0x2e8b57,
+  gold: 0xffc93c,
+  cash: 0x37c978,
+};
 
-// Car paint palette (hex numbers).
-export const PAINTS = [
-  0xc0392b, 0x2980b9, 0xf1c40f, 0x27ae60, 0x8e44ad, 0xe67e22, 0xecf0f1, 0x2c3e50,
-  0x16a085, 0xd35400, 0x7f8c8d, 0xb03a2e,
-];
+export const HUD = {
+  minimapSize: 180, // px, square canvas in the corner
+  minimapRange: 110, // metres of city shown across the minimap
+};

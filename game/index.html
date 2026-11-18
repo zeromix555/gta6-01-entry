@@ -1,107 +1,155 @@
-<!doctype html>
-<!-- SOLMAR HEAT v3 -->
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SOLMAR HEAT — an original open-world crime game: steal cars, outrun the police, and pull three jobs across the city of Solmar.">
 <link rel="icon" href="data:,">
-<title>SOLMAR HEAT — an original open-world crime game</title>
+<title>SOLMAR HEAT — an open-world crime game</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #0e1a12; font-family: 'Segoe UI', system-ui, sans-serif; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; overflow: hidden; background: #10141a; }
+  body { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: #f2f2f2; }
   #game { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  #hud { position: fixed; inset: 0; pointer-events: none; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8); z-index: 5; }
-  #hud-top-left { position: absolute; top: 14px; left: 16px; }
-  #hud-stars { font-size: 30px; letter-spacing: 4px; color: #888; }
-  #hud-cash { font-size: 26px; font-weight: 700; color: #37e08a; margin-top: 2px; }
-  #hud-health { width: 210px; height: 12px; background: rgba(0,0,0,.55); border: 1px solid rgba(255,255,255,.5); border-radius: 6px; margin-top: 8px; overflow: hidden; }
-  #hud-health-fill { height: 100%; width: 100%; background: #37e08a; }
-  #hud-health-text { font-size: 13px; font-weight: 600; margin-top: 2px; }
-  #hud-ammo { font-size: 15px; font-weight: 600; margin-top: 4px; }
-  #hud-top-right { position: absolute; top: 14px; right: 16px; }
-  #minimap { width: 180px; height: 180px; border: 2px solid rgba(255,255,255,.65); border-radius: 8px; background: #0e1a12; box-shadow: 0 2px 12px rgba(0,0,0,.5); }
-  #hud-objective { position: absolute; top: 14px; left: 50%; transform: translateX(-50%); max-width: 560px; text-align: center; font-size: 17px; font-weight: 700; background: rgba(0,0,0,.55); padding: 8px 16px; border-radius: 8px; border: 1px solid rgba(255,215,0,.6); }
-  #hud-message { position: absolute; top: 74px; left: 50%; transform: translateX(-50%); max-width: 640px; text-align: center; font-size: 16px; background: rgba(20,20,20,.75); padding: 8px 16px; border-radius: 8px; transition: opacity .4s; }
-  #hud-bottom-left { position: absolute; bottom: 16px; left: 16px; font-size: 14px; background: rgba(0,0,0,.5); padding: 8px 12px; border-radius: 8px; }
-  #hud-speed { position: absolute; bottom: 16px; right: 16px; font-size: 30px; font-weight: 800; background: rgba(0,0,0,.5); padding: 6px 14px; border-radius: 8px; }
-  .overlay { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(5,10,8,.72); color: #fff; z-index: 10; padding: 20px; }
-  .overlay.hidden { display: none; }
-  .overlay h1 { font-size: 64px; margin: 0; letter-spacing: 3px; color: #ffd700; text-shadow: 0 4px 0 #b3541e, 0 8px 24px rgba(0,0,0,.8); }
-  .overlay h2 { font-size: 34px; margin: 0 0 10px; color: #ffd700; }
-  .overlay p { font-size: 18px; max-width: 640px; line-height: 1.5; }
-  .overlay .sub { color: #ffd700; font-weight: 700; letter-spacing: 2px; }
-  .overlay button { pointer-events: auto; cursor: pointer; font-size: 18px; font-weight: 700; color: #111; background: #ffd700; border: none; border-radius: 8px; padding: 12px 28px; margin: 8px; box-shadow: 0 4px 0 #b8860b; }
-  .overlay button:hover { background: #ffe14d; }
-  .overlay button.secondary { background: #e8e8e8; box-shadow: 0 4px 0 #888; }
-  .controls { font-size: 15px; background: rgba(0,0,0,.5); border: 1px solid rgba(255,255,255,.3); border-radius: 8px; padding: 12px 18px; margin-top: 14px; line-height: 1.7; text-align: left; }
-  #damage-flash { position: fixed; inset: 0; pointer-events: none; z-index: 6; box-shadow: inset 0 0 120px rgba(255,0,0,.55); opacity: 0; }
+
+  /* Status line: the self-test and the screen reader report through this. */
+  #status {
+    position: fixed; left: 10px; bottom: 8px; z-index: 40;
+    font-size: 12px; color: rgba(255, 255, 255, 0.65);
+    text-shadow: 0 1px 2px #000; pointer-events: none;
+    max-width: 60vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* HUD: top-left cluster, top-right minimap, centre toast. */
+  #hud { position: fixed; inset: 0; z-index: 20; pointer-events: none; display: none; }
+  .hud-panel {
+    position: absolute; background: rgba(10, 14, 18, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 8px;
+    padding: 8px 12px; font-size: 14px; line-height: 1.5;
+    text-shadow: 0 1px 2px #000;
+  }
+  #hud-stats { top: 12px; left: 12px; min-width: 210px; }
+  #hud-stats .row { display: flex; justify-content: space-between; gap: 14px; }
+  #hud-stats .label { color: #9fb4c8; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+  #hud-health-bar { height: 8px; background: #222; border-radius: 4px; overflow: hidden; margin: 2px 0 4px; }
+  #hud-health-fill { height: 100%; width: 100%; background: #37c978; transition: width 0.15s; }
+  #hud-stars { color: #ffc93c; font-size: 18px; letter-spacing: 2px; }
+  #hud-money { color: #37c978; font-weight: 700; }
+  #hud-mission { top: 12px; left: 50%; transform: translateX(-50%); max-width: 46vw; text-align: center; font-size: 13px; }
+  #hud-minimap { top: 12px; right: 12px; padding: 6px; }
+  #minimap { display: block; width: 180px; height: 180px; border-radius: 4px; }
+  #hud-controls { bottom: 28px; left: 12px; font-size: 11px; color: #b8c4d0; }
+  #hud-toast {
+    position: absolute; top: 22%; left: 50%; transform: translateX(-50%);
+    background: rgba(10, 14, 18, 0.8); border: 1px solid rgba(255, 201, 60, 0.5);
+    color: #ffd97a; border-radius: 8px; padding: 10px 18px; font-size: 15px;
+    opacity: 0; transition: opacity 0.3s; white-space: nowrap;
+  }
+
+  /* Full-screen menu overlays. */
+  .screen {
+    position: fixed; inset: 0; z-index: 30; display: none;
+    flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 24px;
+    background: radial-gradient(ellipse at center, rgba(8, 12, 18, 0.55) 0%, rgba(8, 12, 18, 0.88) 100%);
+  }
+  .screen h1 {
+    font-size: 64px; font-weight: 900; letter-spacing: 0.04em; line-height: 0.95;
+    color: #ffc93c; text-shadow: 0 0 24px rgba(255, 150, 40, 0.55), 0 4px 0 #7a2a12, 0 8px 24px #000;
+  }
+  .screen h1 .heat { color: #ff5a2a; }
+  .screen h2 { font-size: 34px; font-weight: 800; color: #ffc93c; text-shadow: 0 2px 12px #000; margin-bottom: 10px; }
+  .screen p { max-width: 560px; font-size: 15px; line-height: 1.6; color: #d5dee8; margin: 12px 0; }
+  .screen .sub { color: #9fb4c8; font-size: 13px; }
+  .screen .keys { font-size: 13px; color: #b8c4d0; background: rgba(255, 255, 255, 0.06); border-radius: 8px; padding: 10px 16px; margin: 10px 0 18px; line-height: 1.9; }
+  .screen .keys b { color: #fff; background: #2a3442; border: 1px solid #4a5a6e; border-radius: 4px; padding: 1px 7px; font-weight: 600; }
+  .btn {
+    pointer-events: auto; cursor: pointer; border: none; border-radius: 8px;
+    background: #ffc93c; color: #1a1206; font-size: 17px; font-weight: 800;
+    padding: 12px 30px; margin: 6px; letter-spacing: 0.03em;
+    box-shadow: 0 4px 0 #a67c14, 0 8px 20px rgba(0, 0, 0, 0.5);
+  }
+  .btn:hover { background: #ffd95e; }
+  .btn:active { transform: translateY(3px); box-shadow: 0 1px 0 #a67c14; }
+  .btn.secondary { background: #2a3442; color: #e8eef4; box-shadow: 0 4px 0 #141a22, 0 8px 20px rgba(0, 0, 0, 0.5); }
+  .btn.secondary:hover { background: #374556; }
+  #title-best { margin-top: 14px; font-size: 13px; color: #9fb4c8; }
 </style>
 </head>
 <body>
-<canvas id="game" aria-label="SOLMAR HEAT: an original open-world crime game in Solmar City"></canvas>
-<p id="status" role="status" aria-live="polite"></p>
-<div id="damage-flash"></div>
+<canvas id="game"></canvas>
 
+<!-- HUD (visible while playing) -->
 <div id="hud">
-  <div id="hud-top-left">
-    <div id="hud-stars">☆☆☆☆☆</div>
-    <div id="hud-cash">$0</div>
-    <div id="hud-health"><div id="hud-health-fill"></div></div>
-    <div id="hud-health-text">HP 100</div>
-    <div id="hud-ammo">AMMO 12/60</div>
+  <div class="hud-panel" id="hud-stats">
+    <div class="row"><span class="label">Health</span><span id="hud-health">100</span></div>
+    <div id="hud-health-bar"><div id="hud-health-fill"></div></div>
+    <div class="row"><span class="label">Ammo</span><span id="hud-ammo">12 / 96</span></div>
+    <div class="row"><span class="label">Speed</span><span id="hud-speed">0 km/h</span></div>
+    <div class="row"><span class="label">Cash</span><span id="hud-money">$250</span></div>
+    <div class="row"><span class="label">Wanted</span><span id="hud-stars">☆☆☆☆☆</span></div>
   </div>
-  <div id="hud-top-right"><canvas id="minimap" width="180" height="180"></canvas></div>
-  <div id="hud-objective">MISSION 1 — FIRST FARE</div>
-  <div id="hud-message" style="opacity:0"></div>
-  <div id="hud-bottom-left"><span id="hud-hint">WASD move · mouse drag camera · Shift run · E interact · Click shoot</span></div>
-  <div id="hud-speed" style="opacity:0">0 km/h</div>
+  <div class="hud-panel" id="hud-mission">Job 1/3 — The Marisol Pickup</div>
+  <div class="hud-panel" id="hud-minimap"><canvas id="minimap" width="180" height="180"></canvas></div>
+  <div class="hud-panel" id="hud-controls">WASD drive / walk &nbsp;·&nbsp; E enter car &nbsp;·&nbsp; Mouse shoot &nbsp;·&nbsp; R reload &nbsp;·&nbsp; H horn &nbsp;·&nbsp; P pause &nbsp;·&nbsp; M mute</div>
+  <div id="hud-toast"></div>
 </div>
 
-<div id="screen-title" class="overlay">
-  <p class="sub">AN ORIGINAL OPEN-WORLD CRIME GAME</p>
-  <h1>SOLMAR HEAT</h1>
-  <p>Solmar City, sun-soaked and wide open. Dario Cruz owes money, drives fast,
-  and is about to take three jobs he cannot refuse — from Maribel's Diner to the
-  docks, a stolen Comet GT, and one last run from Solmar Trust Bank.</p>
-  <p id="title-best">A new driver in Solmar City</p>
+<!-- Title screen -->
+<div class="screen" id="screen-title" style="display:flex">
+  <h1>SOLMAR<br><span class="heat">HEAT</span></h1>
+  <p>Solmar is a city that pays in cash and collects in blood. Steal cars,
+  outrun the cruisers, and pull three jobs — the diner pickup, the harbor
+  handoff, and the bank — before the heat catches you.</p>
+  <div class="keys">
+    <b>W A S D</b> walk / drive &nbsp; <b>E</b> enter &amp; exit car &nbsp; <b>Mouse</b> shoot<br>
+    <b>R</b> reload &nbsp; <b>Shift</b> run &nbsp; <b>P</b> pause &nbsp; <b>M</b> mute &nbsp; <b>Enter</b> start
+  </div>
   <div>
-    <button id="btn-start">▶ START NEW GAME</button>
-    <button id="btn-continue" class="secondary">CONTINUE</button>
+    <button class="btn" id="btn-start">Start new run</button>
+    <button class="btn secondary" id="btn-continue">Continue</button>
   </div>
-  <div class="controls">
-    <b>HOW TO PLAY</b><br>
-    WASD move / drive · Mouse drag orbits the camera · Shift run · Space handbrake<br>
-    E get in a car / steal / interact · Click shoot · R reload · P pause · M mute<br>
-    Steal cars, lose the cops, run the three missions — and grab the green cash drops.
+  <div id="title-best"></div>
+  <p class="sub">An original open-world crime game. No real places, people or cars — just Solmar.</p>
+</div>
+
+<!-- Paused -->
+<div class="screen" id="screen-paused">
+  <h2>Paused</h2>
+  <p>Solmar waits. The cruisers do not — they will still be there when you come back.</p>
+  <div>
+    <button class="btn" id="btn-resume">Resume</button>
+    <button class="btn secondary" id="btn-restart">Restart run</button>
   </div>
 </div>
 
-<div id="screen-paused" class="overlay hidden">
-  <h2>PAUSED</h2>
-  <p>Solmar City waits for no one. Except right now.</p>
-  <button id="btn-resume">RESUME</button>
-  <button id="btn-restart" class="secondary">RESTART FROM SAVE</button>
+<!-- Busted -->
+<div class="screen" id="screen-busted">
+  <h2>Busted</h2>
+  <p id="busted-text">The cops took their cut.</p>
+  <div><button class="btn" id="btn-busted-ok">Walk it off</button></div>
 </div>
 
-<div id="screen-busted" class="overlay hidden">
-  <h2>BUSTED!</h2>
-  <p id="busted-text">The Solmar PD caught Dario.</p>
-  <button id="btn-busted-ok">WALK FREE (10% FINE)</button>
+<!-- Game over -->
+<div class="screen" id="screen-over">
+  <h2>Flatlined</h2>
+  <p id="over-text">Solmar got you.</p>
+  <div><button class="btn" id="btn-over-retry">Try again</button></div>
 </div>
 
-<div id="screen-over" class="overlay hidden">
-  <h2>DARIO IS DOWN</h2>
-  <p id="over-text">Solmar City wins this round.</p>
-  <button id="btn-over-retry">TRY AGAIN</button>
-</div>
-
-<div id="screen-win" class="overlay hidden">
-  <h2>SOLMAR IS YOURS</h2>
+<!-- Win -->
+<div class="screen" id="screen-win">
+  <h2>Solmar is yours</h2>
   <p id="win-text">All three jobs done.</p>
-  <button id="btn-win-roam">KEEP ROAMING FREE</button>
+  <div>
+    <button class="btn" id="btn-win-roam">Keep roaming</button>
+    <button class="btn secondary" id="btn-win-restart">New run</button>
+  </div>
 </div>
 
-<script src="./vendor/three.min.js"></script>
+<p id="status" role="status" aria-live="polite">Loading Solmar…</p>
+
+<script src="vendor/three.min.js"></script>
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>

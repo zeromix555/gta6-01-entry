@@ -1,133 +1,184 @@
-// SOLMAR HEAT v3
-// Staged screenshot scenes behind ?shot=chase|street|mission|start.
-// Each scene plays the real rules forward from a fresh world for a fixed
-// number of steps, steered by a scripted autopilot, so the frame is what a
-// short stretch of real play looks like — and the same seed always gives
-// the same frame.
-import { STEP, PLACES } from './config.js';
-import { SCREEN_TITLE, SCREEN_PLAY } from './render.js';
-import { spawnGuards, worldStep } from './world.js';
+// SOLMAR HEAT — the four staged screenshots.
+//
+// Each shot builds a fresh world from the seed, arranges a real gameplay
+// moment with the same rules the player lives under, then drives it forward
+// with scripted inputs (an autopilot) for a few seconds. Nothing is posed
+// by hand in the renderer: the chase shot really is the sports car doing
+// 30 m/s down the avenue with cruisers behind it, and the mission shot
+// really is the bank job with its guards out. After the autopilot the main
+// loop paints three frames and the shot is ready.
+//
+// The queries in shots.json are `?shot=<name>&seed=7`; the same seed always
+// produces the same frame.
 
-const SAMPLE = STEP;
+import { STEP, PLACES, COMBAT } from './config.js';
+import { worldStep, playerPos } from './world.js';
+import { spawnCopAt } from './police.js';
+import { spawnGuards } from './missions.js';
 
-function blankInput() {
-  return {
-    moveX: 0, moveY: 0, run: false,
-    throttle: 0, steer: 0, brake: false,
-    interact: false, shoot: false, reload: false,
-    camDX: 0, camDY: 0,
-  };
-}
+const BLANK = () => ({
+  moveX: 0,
+  moveY: 0,
+  run: false,
+  throttle: 0,
+  steer: 0,
+  brake: false,
+  interact: false,
+  shoot: false,
+  reload: false,
+  camDX: 0,
+  camDY: 0,
+});
 
-function stepFor(world, seconds, inputFn, updateCam) {
-  const steps = Math.round(seconds / SAMPLE);
-  for (let i = 0; i < steps; i += 1) {
-    worldStep(world, SAMPLE, inputFn(i, steps));
-    if (updateCam) updateCam();
-  }
+/**
+ * Stage one shot by name. `world` is fresh (seed 7). Returns the screen the
+ * shot wants shown ('play' or 'title'). The caller renders three frames and
+ * sets window.__shotReady.
+ */
+export function stageShot(world, name) {
+  if (name === 'chase') return stageChase(world);
+  if (name === 'street') return stageStreet(world);
+  if (name === 'mission') return stageMission(world);
+  if (name === 'start') return stageStart(world);
+  return 'play';
 }
 
 /**
- * Put `world` into the named scene and return the screen to draw over it.
- * Scenes:
- *  start   — title screen: Dario by his sedan, traffic rolling past.
- *  chase   — cover: Comet GT tearing down the avenue, three cop cars on its tail, 3 stars.
- *  street  — on foot downtown: traffic, pedestrians, mission marker ahead.
- *  mission — the bank job: guards, muzzle flash, 4 stars, cops closing in.
+ * CHASE (the cover): the player in the red Falco GT, flat out down the
+ * central avenue at speed, three wanted stars, three cruisers in pursuit
+ * behind. Autopilot: full throttle with a gentle weave for 2.5 seconds.
+ *
+ * The camera is a front tracking shot (camYaw opposite the heading): the
+ * sports car drives towards the lens with the cruisers trailing behind it
+ * in the same frame. A normal chase camera would hide the pursuit behind
+ * the lens, which is exactly what this cover must show.
  */
-export function stageShot(name, world, updateCam) {
-  const p = world.player;
-  if (name === 'chase') {
-    // Put Dario in the Comet GT on the central avenue, cops in pursuit.
-    const comet = world.comet;
-    comet.parked = false;
-    comet.x = -120; comet.z = 0; comet.heading = Math.PI / 2; comet.speed = 18;
-    comet.mesh.position.set(comet.x, 0, comet.z);
-    p.inCar = comet;
-    p.mesh.visible = false;
-    p.x = comet.x; p.z = comet.z;
-    p.camYaw = Math.PI / 2; p.camPitch = 0.3;
-    world.wanted.stars = 3;
-    world.missions.index = 1; world.missions.stage = 2; // M2: lose the cops
-    world.money = 1250;
-    // Seed two traffic cars on the avenue ahead so the road is alive.
-    const t0 = world.traffic[0]; const t1 = world.traffic[1];
-    t0.x = -40; t0.z = 3.5; t0.heading = Math.PI / 2; t0.speed = 11; t0.target = { x: 174, z: 3.5 };
-    t1.x = 60; t1.z = -3.5; t1.heading = -Math.PI / 2; t1.speed = 10; t1.target = { x: -174, z: -3.5 };
-    stepFor(world, 4.5, (i) => {
-      const input = blankInput();
-      input.throttle = 1;
-      // Hold the avenue: steer back toward z = 0 and heading PI/2.
-      const headingErr = comet.heading - Math.PI / 2;
-      input.steer = Math.max(-1, Math.min(1, -(comet.z * 0.06 + headingErr * 2.2)));
-      return input;
-    }, updateCam);
-    // Pose the pursuit for the frame: two cop cars flanking the Comet just
-    // behind it, one more closing from the side ahead — all inside the view.
-    const fx = Math.sin(comet.heading); const fz = Math.cos(comet.heading);
-    const rx = -Math.cos(comet.heading); const rz = Math.sin(comet.heading);
-    const poses = [
-      { along: -7, side: -6.5 }, { along: -11, side: 6.5 }, { along: 16, side: -8 }, { along: -20, side: 0 },
-    ];
-    world.wanted.cops.forEach((cop, i) => {
-      const pose = poses[i % poses.length];
-      cop.x = comet.x + fx * pose.along + rx * pose.side;
-      cop.z = comet.z + fz * pose.along + rz * pose.side;
-      cop.heading = comet.heading;
-      cop.speed = 26;
-      cop.mesh.position.set(cop.x, 0, cop.z);
-    });
-    stepFor(world, 0.7, (i) => {
-      const input = blankInput();
-      input.throttle = 1;
-      const headingErr = comet.heading - Math.PI / 2;
-      input.steer = Math.max(-1, Math.min(1, -(comet.z * 0.06 + headingErr * 2.2)));
-      return input;
-    }, updateCam);
-    return { screen: SCREEN_PLAY };
+function stageChase(world) {
+  world.screen = 'play';
+  const car = world.sportsCar;
+  car.x = 2;
+  car.z = 30;
+  car.heading = Math.PI;
+  car.speed = 24;
+  world.player.x = car.x;
+  world.player.z = car.z;
+  world.player.heading = Math.PI;
+  world.player.camYaw = 0; // front tracking shot: camera ahead, looking back
+  world.player.inCar = true;
+  world.player.car = car;
+
+  // Three stars, three cruisers stacked behind the sports car.
+  world.wanted.stars = 3;
+  world.wanted.lastCrimeAt = world.time;
+  world.wanted.cops.length = 0;
+  const offsets = [16, 28, 42];
+  offsets.forEach((off, i) => {
+    world.wanted.cops.push(spawnCopAt(world, 2, 30 + off, Math.PI, 22, i));
+  });
+
+  for (let i = 0; i < 150; i++) {
+    const input = BLANK();
+    input.throttle = 1;
+    input.steer = Math.sin(i * 0.05) * 0.12; // a gentle weave, not a swerve
+    worldStep(world, STEP, input);
+  }
+  return 'play';
+}
+
+/**
+ * STREET: on foot downtown at the crossroads, mission 0 live, traffic
+ * crossing in both directions, the gold marker ahead. Autopilot: walk
+ * forward through the intersection for 1.5 seconds.
+ *
+ * One traffic car is placed on the crossing street so the frame always has
+ * a car mid-intersection in front of the player, not just distant traffic.
+ */
+function stageStreet(world) {
+  world.screen = 'play';
+  world.player.x = 2;
+  world.player.z = -34;
+  world.player.heading = Math.PI;
+  world.player.camYaw = Math.PI;
+  world.missions.index = 0;
+  world.missions.stage = 1;
+  world.objective = { x: 44, z: -56 };
+
+  // The crossing car: eastbound on street z = -40, about to enter the
+  // crossroads the player is walking through.
+  const crosser = world.traffic[0];
+  if (crosser) {
+    crosser.axis = 'z';
+    crosser.line = -40;
+    crosser.lane = 3;
+    crosser.dir = 1;
+    crosser.x = -30;
+    crosser.z = -37;
+    crosser.speed = 10;
+    crosser.targetSpeed = 10;
   }
 
-  if (name === 'street') {
-    // On foot in the middle of the (0, 58) crossroads, mission 1 active.
-    // The camera looks east down the avenue, so the road — never a building
-    // face — fills the frame, with traffic crossing right in front of Dario.
-    p.x = 0; p.z = 58; p.heading = Math.PI / 2; p.camYaw = Math.PI / 2; p.camPitch = 0.28;
-    p.mesh.position.set(p.x, 0, p.z);
-    world.missions.index = 0; world.missions.stage = 1; // M1: drive to the diner
-    world.money = 120;
-    const s0 = world.traffic[0]; const s1 = world.traffic[1];
-    s0.x = -70; s0.z = 61.5; s0.heading = Math.PI / 2; s0.speed = 11; s0.target = { x: 174, z: 58 };
-    s1.x = 3.5; s1.z = -10; s1.heading = 0; s1.speed = 10; s1.target = { x: 0, z: 174 };
-    stepFor(world, 5, (i) => {
-      const input = blankInput();
-      input.moveY = 0.5; // stroll east down the avenue
-      return input;
-    }, updateCam);
-    return { screen: SCREEN_PLAY };
+  for (let i = 0; i < 90; i++) {
+    const input = BLANK();
+    input.moveY = 1;
+    worldStep(world, STEP, input);
   }
+  return 'play';
+}
 
-  if (name === 'mission') {
-    // The bank job: Dario on foot outside Solmar Trust, guards out, 4 stars.
-    // Camera sits front-right so the bank shows at an angle, guards in the open.
-    world.missions.index = 2; world.missions.stage = 2; // M3: escape to the hideout
-    world.wanted.stars = 4;
-    world.money = 3050;
-    spawnGuards(world);
-    // Dario south of the bank, guards between him and its doors.
-    p.x = 35; p.z = 112; p.heading = Math.PI; p.camYaw = Math.PI + 0.45; p.camPitch = 0.26;
-    p.mesh.position.set(p.x, 0, p.z);
-    stepFor(world, 3.5, (i) => {
-      const input = blankInput();
-      // Fire in bursts at the guards.
-      input.shoot = (i % 30) < 12;
-      return input;
-    }, updateCam);
-    return { screen: SCREEN_PLAY };
+/**
+ * MISSION: the bank job. The player is on foot outside the Solmar National
+ * Bank, the four guards are out, four wanted stars, cruisers closing in.
+ * Autopilot: walk towards the bank doors for a second.
+ */
+function stageMission(world) {
+  world.screen = 'play';
+  world.missions.index = 2;
+  world.missions.stage = 2;
+  world.missions.guardsSpawned = false;
+  world.objective = { x: -44, z: -56 };
+  spawnGuards(world);
+
+  world.player.x = -40;
+  world.player.z = -48;
+  world.player.heading = -Math.PI / 2; // facing the bank (west)
+  world.player.camYaw = -Math.PI / 2;
+
+  // Four stars, four cruisers coming down the surrounding roads.
+  world.wanted.stars = 4;
+  world.wanted.lastCrimeAt = world.time;
+  world.wanted.cops.length = 0;
+  const copSpots = [
+    { x: -40, z: -10, heading: Math.PI },
+    { x: 0, z: -56, heading: -Math.PI / 2 },
+    { x: -80, z: -56, heading: Math.PI / 2 },
+    { x: -40, z: -100, heading: 0 },
+  ];
+  copSpots.forEach((spot, i) => {
+    world.wanted.cops.push(spawnCopAt(world, spot.x, spot.z, spot.heading, 16, i));
+  });
+
+  for (let i = 0; i < 60; i++) {
+    const input = BLANK();
+    input.moveY = 1;
+    worldStep(world, STEP, input);
   }
+  return 'play';
+}
 
-  // Default: title screen over a living city — Dario by his sedan.
-  p.x = -47.5; p.z = -14; p.heading = -2.82; p.camYaw = -2.82; p.camPitch = 0.3;
-  p.mesh.position.set(p.x, 0, p.z);
-  stepFor(world, 6, () => blankInput(), updateCam);
-  return { screen: SCREEN_TITLE, best: 0 };
+/**
+ * START: the title screen over a living city. The player stands by the home
+ * sedan while traffic rolls past. Autopilot: 2.5 seconds of ambient city —
+ * traffic and pedestrians move, the player does not.
+ */
+function stageStart(world) {
+  world.screen = 'title';
+  world.player.x = PLACES.spawn.x;
+  world.player.z = PLACES.spawn.z;
+  world.player.heading = Math.PI;
+  world.player.camYaw = Math.PI;
+
+  for (let i = 0; i < 150; i++) {
+    worldStep(world, STEP, BLANK());
+  }
+  return 'title';
 }

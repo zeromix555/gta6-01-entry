@@ -1,159 +1,238 @@
-// SOLMAR HEAT v3
-// The player — Dario Cruz. On foot (WASD + mouse orbit, Shift to run,
-// click to fire the pistol) and behind the wheel (W/S throttle, A/D steer,
-// Space handbrake, E to get in/out and to steal).
-import { PLAYER, CAR } from './config.js';
-import { resolveCollisions } from './city.js';
+// SOLMAR HEAT — the player on foot: walking, shooting, stealing cars,
+// getting busted, and getting killed.
+//
+// One rule governs the interact key (E): a single press does exactly one
+// thing, with this priority — collect a mission package you are standing
+// on, step out of the car you are driving, or climb into the nearest car.
+// That priority is what makes the scripted self-test deterministic: exiting
+// the car at the objective never accidentally collects the package in the
+// same step, and collecting never accidentally re-enters the car.
 
-export function makePlayerMesh() {
-  const group = new THREE.Group();
-  const jacket = new THREE.MeshLambertMaterial({ color: 0x1e7a5a });
-  const jeans = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
-  const skin = new THREE.MeshLambertMaterial({ color: 0xe0ac69 });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.8, 0.36), jacket);
-  body.position.y = 1.05; body.castShadow = true;
-  group.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 12, 10), skin);
-  head.position.y = 1.68; head.castShadow = true;
-  group.add(head);
-  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.27, 0.28, 0.12, 12),
-    new THREE.MeshLambertMaterial({ color: 0x111111 }));
-  cap.position.y = 1.88; group.add(cap);
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.62, 0.22), jeans);
-  legL.position.set(-0.16, 0.32, 0); group.add(legL);
-  const legR = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.62, 0.22), jeans);
-  legR.position.set(0.16, 0.32, 0); group.add(legR);
-  const armL = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.6, 0.16), jacket);
-  armL.position.set(-0.42, 1.05, 0); group.add(armL);
-  const armR = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.6, 0.16), jacket);
-  armR.position.set(0.42, 1.05, 0); group.add(armR);
-  return { group, legL, legR, armL, armR, body };
-}
+import { PLAYER, COMBAT, ECONOMY, PLACES } from './config.js';
+import { clamp, dist2d } from './random.js';
+import { collideBuildings } from './city.js';
+import { playerPos, onEvent, saveGame } from './world.js';
+import { addWanted } from './police.js';
+import { collectMissionPackage, missionStageAt } from './missions.js';
 
-export function createPlayer(scene, x, z) {
-  const mesh = makePlayerMesh();
-  mesh.group.position.set(x, 0, z);
-  scene.add(mesh.group);
-  return {
-    x, z, heading: 0,
-    camYaw: Math.PI * 0.15, camPitch: 0.32,
-    speed: 0,
-    inCar: null,
-    health: PLAYER.healthMax,
-    magAmmo: PLAYER.pistolMag,
-    reserveAmmo: 60,
-    fireCooldown: 0,
-    walkPhase: 0,
-    mesh: mesh.group,
-    legL: mesh.legL, legR: mesh.legR,
-    armL: mesh.armL, armR: mesh.armR,
-    damageFlash: 0,
-  };
-}
+/** Walk the player for one step (only called when not in a car). */
+export function updatePlayer(world, dt, input) {
+  const p = world.player;
+  const moveY = input.moveY || 0;
+  const moveX = input.moveX || 0;
+  const run = !!input.run;
 
-// Move on foot. `move` is {x, z} in camera space (-1..1). Returns distance moved.
-export function playerWalkStep(player, dt, move, running, colliders) {
-  const len = Math.hypot(move.x, move.z);
-  let mx = 0; let mz = 0;
-  if (len > 0.01) { mx = move.x / len; mz = move.z / len; }
-  const speed = running ? PLAYER.runSpeed : PLAYER.walkSpeed;
-  const targetHeading = len > 0.01 ? Math.atan2(mx, mz) : player.heading;
-  let diff = targetHeading - player.heading;
-  while (diff > Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  player.heading += Math.max(-10 * dt, Math.min(10 * dt, diff));
-  const vx = mx * speed * (len > 0.01 ? 1 : 0);
-  const vz = mz * speed * (len > 0.01 ? 1 : 0);
-  const fixed = resolveCollisions(player.x + vx * dt, player.z + vz * dt, PLAYER.radius, colliders);
-  player.x = fixed.x; player.z = fixed.z;
-  player.speed = Math.hypot(vx, vz);
-  player.walkPhase += dt * player.speed * 1.6;
-  player.mesh.position.set(player.x, 0, player.z);
-  player.mesh.rotation.y = player.heading;
-  player.legL.rotation.x = Math.sin(player.walkPhase) * 0.7;
-  player.legR.rotation.x = -Math.sin(player.walkPhase) * 0.7;
-  player.armL.rotation.x = -Math.sin(player.walkPhase) * 0.5;
-  player.armR.rotation.x = Math.sin(player.walkPhase) * 0.5;
-}
+  // A/D turn the body; W/S walk forward and back along the heading.
+  p.heading += moveX * PLAYER.turnSpeed * dt;
+  const speed = run ? PLAYER.runSpeed : PLAYER.walkSpeed;
+  const fx = Math.sin(p.heading);
+  const fz = Math.cos(p.heading);
+  const nx = p.x + fx * moveY * speed * dt;
+  const nz = p.z + fz * moveY * speed * dt;
 
-// Arcade driving. `drive` is {throttle -1..1, steer -1..1, brake bool}.
-export function playerDriveStep(player, car, dt, drive, colliders, others, onHitPed) {
-  const forward = { x: Math.sin(car.heading), z: Math.cos(car.heading) };
-  if (drive.throttle > 0) {
-    car.speed += CAR.accel * drive.throttle * dt;
-  } else if (drive.throttle < 0) {
-    if (car.speed > 0.5) car.speed -= CAR.brake * dt; // brake while rolling forward
-    else car.speed -= CAR.reverseAccel * dt; // reverse
+  const fixed = collideBuildings(world.city.buildings, nx, nz, PLAYER.radius);
+  p.x = fixed.x;
+  p.z = fixed.z;
+  if (moveY !== 0) p.walkPhase += dt * speed * 1.6;
+
+  // Camera yaw follows the body unless the mouse has taken over recently.
+  p.camYaw += (p.heading - p.camYaw) * Math.min(1, dt * 4);
+
+  // Shooting and reloading.
+  if (p.fireCooldown > 0) p.fireCooldown -= dt;
+  if (p.hurtCooldown > 0) p.hurtCooldown -= dt;
+  if (input.shoot) shoot(world);
+  if (input.reload) reload(world);
+
+  // Health trickles back after ten quiet seconds: Solmar lets you catch
+  // your breath, but only once the shooting has actually stopped.
+  if (p.health > 0 && p.health < PLAYER.maxHealth && world.time - p.lastHurtAt > 10) {
+    p.health = Math.min(PLAYER.maxHealth, p.health + 3 * dt);
   }
-  if (drive.brake) car.speed -= Math.sign(car.speed) * CAR.brake * dt * 0.8;
-  // Drag + rolling resistance.
-  car.speed -= car.speed * 0.35 * dt;
-  car.speed = Math.max(-CAR.maxReverse, Math.min(CAR.maxSpeed, car.speed));
-  if (Math.abs(car.speed) < 0.05 && drive.throttle === 0) car.speed = 0;
-  const steerAmount = drive.steer * CAR.steerMax * (car.speed >= 0 ? 1 : -1);
-  // Steer right (D) decreases heading: forward (sin h, cos h) rotates toward
-  // camera-right (-cos h, sin h) as the heading falls.
-  car.heading -= (steerAmount * car.speed * 0.09) * dt * 3.2;
-  let nx = car.x + Math.sin(car.heading) * car.speed * dt;
-  let nz = car.z + Math.cos(car.heading) * car.speed * dt;
-  // Bounce off buildings.
-  const before = { x: car.x, z: car.z };
-  const fixed = resolveCollisions(nx, nz, 1.7, colliders);
-  if (Math.hypot(fixed.x - nx, fixed.z - nz) > 0.01) {
-    car.speed *= 0.45;
-    car.health -= 2;
+}
+
+/** Fire one pistol shot: costs a round, makes noise, raises heat. */
+export function shoot(world) {
+  const p = world.player;
+  if (p.inCar) return; // no drive-bys: shoot on foot only
+  if (p.fireCooldown > 0) return;
+  if (p.magAmmo <= 0) {
+    p.fireCooldown = 0.25; // dry click, then you may try again
+    onEvent(world, 'dry-fire');
+    return;
   }
-  nx = fixed.x; nz = fixed.z;
-  // Soft collision with other cars.
-  for (const other of others) {
-    if (other === car) continue;
-    const dx = nx - other.x; const dz = nz - other.z;
-    const d = Math.hypot(dx, dz);
-    if (d < 3.4 && d > 0.01) {
-      const push = (3.4 - d) / 2;
-      nx += (dx / d) * push; nz += (dz / d) * push;
-      car.speed *= 0.7;
-      if (Math.abs(car.speed) > 6) car.health -= 3;
+  p.fireCooldown = COMBAT.fireInterval;
+  p.magAmmo -= 1;
+  world.stats.shotsFired += 1;
+  onEvent(world, 'shot', { x: p.x, z: p.z, heading: p.heading });
+  addWanted(world, COMBAT.shotWanted);
+
+  // Hit scan: the nearest guard roughly in front of you, inside range.
+  const fx = Math.sin(p.heading);
+  const fz = Math.cos(p.heading);
+  let bestGuard = null;
+  let bestDist = COMBAT.shotRange;
+  for (const guard of world.guards) {
+    if (guard.health <= 0) continue;
+    const dx = guard.x - p.x;
+    const dz = guard.z - p.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d > bestDist) continue;
+    const dot = (dx * fx + dz * fz) / (d || 1); // cos of the angle off aim
+    if (dot < Math.cos(COMBAT.shotHalfAngle)) continue;
+    bestGuard = guard;
+    bestDist = d;
+  }
+  if (bestGuard) {
+    bestGuard.health -= 1;
+    onEvent(world, 'guard-hit', { guard: bestGuard.id, health: bestGuard.health });
+    if (bestGuard.health <= 0) {
+      onEvent(world, 'guard-down', { guard: bestGuard.id });
     }
   }
-  car.x = nx; car.z = nz;
-  car.mesh.position.set(car.x, 0, car.z);
-  car.mesh.rotation.y = car.heading;
-  const spin = car.speed * dt * 2.6;
-  for (const w of car.wheels) w.rotation.x += spin;
-  player.x = car.x; player.z = car.z;
-  player.heading = car.heading;
-  if (onHitPed) onHitPed(car);
-  return car;
+
+  // A pedestrian caught in front of you goes down (and stays down).
+  let bestPed = null;
+  let bestPedDist = 14;
+  for (const ped of world.pedestrians) {
+    if (ped.state === 'down') continue;
+    const dx = ped.x - p.x;
+    const dz = ped.z - p.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d > bestPedDist) continue;
+    const dot = (dx * fx + dz * fz) / (d || 1);
+    if (dot < 0.9) continue;
+    bestPed = ped;
+    bestPedDist = d;
+  }
+  if (bestPed) {
+    bestPed.state = 'down';
+    bestPed.downTimer = 6;
+    world.stats.pedsDown += 1;
+    onEvent(world, 'ped-down', { ped: bestPed.id });
+  }
 }
 
-// Fire the pistol from the camera through the screen centre.
-// `targets` are {x, z, y, radius, ref} hit spheres. Returns the hit ref or null.
-export function playerShoot(player, camera, targets) {
-  if (player.fireCooldown > 0 || player.magAmmo <= 0) return null;
-  player.fireCooldown = PLAYER.fireInterval;
-  player.magAmmo -= 1;
-  const origin = new THREE.Vector3(player.x, 1.5, player.z);
-  const dir = new THREE.Vector3();
-  camera.getWorldDirection(dir);
-  let best = null; let bestT = PLAYER.pistolRange;
-  for (const t of targets) {
-    const to = new THREE.Vector3(t.x - origin.x, (t.y || 1.2) - origin.y, t.z - origin.z);
-    const proj = to.dot(dir);
-    if (proj < 0 || proj > bestT) continue;
-    const closest = origin.clone().addScaledVector(dir, proj);
-    const d = Math.hypot(closest.x - t.x, closest.y - (t.y || 1.2), closest.z - t.z);
-    if (d < (t.radius || 1.0)) { best = t.ref; bestT = proj; }
-  }
-  return best;
+/** Move rounds from the reserve into the magazine. */
+export function reload(world) {
+  const p = world.player;
+  if (p.magAmmo >= COMBAT.magSize) return;
+  if (p.reserveAmmo <= 0) return;
+  const need = COMBAT.magSize - p.magAmmo;
+  const moved = Math.min(need, p.reserveAmmo);
+  p.magAmmo += moved;
+  p.reserveAmmo -= moved;
+  onEvent(world, 'reload', { mag: p.magAmmo, reserve: p.reserveAmmo });
 }
 
-export function nearestCar(player, cars, maxDist) {
-  let best = null; let bestD = maxDist;
-  for (const car of cars) {
-    if (car.police) continue;
-    const d = Math.hypot(car.x - player.x, car.z - player.z);
-    if (d < bestD) { bestD = d; best = car; }
+/**
+ * The interact key. Priority: (1) collect a mission package underfoot,
+ * (2) step out of the car, (3) climb into the nearest car. Exactly one
+ * action per press.
+ */
+export function tryInteract(world) {
+  const p = world.player;
+
+  // In a car: step out beside it.
+  if (p.inCar && p.car) {
+    exitCar(world);
+    return;
   }
-  return best;
+
+  // On foot at the objective while the package is waiting: collect it.
+  const pos = playerPos(world);
+  if (world.missions.stage === 2 && missionStageAt(world) === 2) {
+    const obj = world.objective;
+    if (dist2d(pos.x, pos.z, obj.x, obj.z) < 10) {
+      collectMissionPackage(world);
+      return;
+    }
+  }
+
+  // Otherwise: climb into the nearest car in range.
+  let best = null;
+  let bestDist = PLAYER.interactRange;
+  for (const car of [world.homeCar, world.sportsCar, ...world.traffic]) {
+    const d = dist2d(pos.x, pos.z, car.x, car.z);
+    if (d < bestDist) {
+      best = car;
+      bestDist = d;
+    }
+  }
+  if (best) enterCar(world, best);
+}
+
+/** Climb into a car. Anything that is not your sedan counts as stealing. */
+export function enterCar(world, car) {
+  const p = world.player;
+  p.inCar = true;
+  p.car = car;
+  car.speed = Math.max(car.speed, 0);
+  if (!car.isHome) {
+    world.stats.carsStolen += 1;
+    addWanted(world, COMBAT.stealWanted);
+    onEvent(world, 'stole-car', { car: car.name });
+  } else {
+    onEvent(world, 'entered-car', { car: car.name });
+  }
+}
+
+/** Step out of the car, beside it, facing the same way it faces. */
+export function exitCar(world) {
+  const p = world.player;
+  const car = p.car;
+  if (!car) return;
+  // Step out on the driver's side: 2.2 m perpendicular to the heading.
+  const sx = Math.cos(car.heading);
+  const sz = -Math.sin(car.heading);
+  p.x = car.x + sx * 2.2;
+  p.z = car.z + sz * 2.2;
+  p.heading = car.heading;
+  p.camYaw = car.heading;
+  p.inCar = false;
+  p.car = null;
+  car.speed *= 0.5;
+  onEvent(world, 'exited-car', { car: car.name });
+}
+
+/** Hurt the player (cops, guards). At zero health the run is over. */
+export function damagePlayer(world, amount, source) {
+  const p = world.player;
+  if (p.hurtCooldown > 0) return;
+  if (world.gameOver || world.busted) return;
+  p.hurtCooldown = PLAYER.hurtCooldown;
+  p.lastHurtAt = world.time; // restarts the ten-second regen clock
+  p.health = Math.max(0, p.health - amount);
+  onEvent(world, 'hurt', { amount, source, health: p.health });
+  if (p.health <= 0) {
+    world.gameOver = true;
+    world.screen = 'over';
+    saveGame(world);
+    onEvent(world, 'game-over');
+  }
+}
+
+/**
+ * Busted: the cops take 10% of your cash and dump you at Solmar General
+ * with full health and a clean slate. The screen flips to 'busted'; the
+ * OK button on that overlay sends you back to play.
+ */
+export function bustPlayer(world) {
+  const p = world.player;
+  const lost = Math.floor(world.money * ECONOMY.bustedLoss);
+  world.money -= lost;
+  p.health = PLAYER.maxHealth;
+  p.x = PLACES.hospital.x;
+  p.z = PLACES.hospital.z;
+  p.heading = Math.PI / 2;
+  p.camYaw = Math.PI / 2;
+  p.inCar = false;
+  p.car = null;
+  p.bustTimer = 0;
+  world.wanted.stars = 0;
+  world.wanted.cops.length = 0;
+  world.busted = true;
+  world.screen = 'busted';
+  saveGame(world);
+  onEvent(world, 'busted', { lost, money: world.money });
 }

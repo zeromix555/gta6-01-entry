@@ -1,388 +1,379 @@
-// SOLMAR HEAT v3
-// SOLMAR HEAT — boot and the one loop.
-// Input is read every frame, the world advances in fixed 1/60 s steps, and
-// the renderer paints what is there. Screens: title, play, paused, busted,
-// game over, and all-missions-done. Progress saves to localStorage.
+// SOLMAR HEAT — boot, the game loop, screens, and the self-test.
 //
-// ?seed=N fixes the city. ?shot=chase|street|mission|start (with &seed=N)
-// stages that scene instead of running the loop, paints it, and sets
-// window.__shotReady for a screenshot. ?selftest=1 runs a scripted play
-// session headlessly and reports the result in #status.
-import { STEP, SAVE_KEY, BEST_KEY, PLACES } from './config.js';
-import { createRandom } from './random.js';
+// This is the only file that touches the DOM at boot. It parses the URL
+// (?seed=, ?shot=, ?selftest=1), builds the world, the renderer, the HUD,
+// the input and the audio, wires the menu buttons, and runs the frame loop.
+//
+// Three modes share this file:
+//   - normal play: title screen -> play -> pause / busted / over / win.
+//   - ?selftest=1: a scripted headless session that reports into #status,
+//     window.__selftest and document.title (see runSelfTest below).
+//   - ?shot=<name>: a staged scene for the screenshots (see shots.js).
+//
+// The outside world sees the game through window.__game:
+//   { world, step, get state() } with state =
+//   { screen, money, wanted, mission, stage, health, ammo, inCar, cops,
+//     guards, pos }.
+
+import { STEP, COMBAT } from './config.js';
+import { createWorld, worldStep, playerPos, onEvent, saveGame, loadSave, applySave, loadBest } from './world.js';
+import { createRenderer, renderWorld, resizeRenderer, snapCamera, spawnParticles } from './render.js';
+import { initHud, updateHud, showScreen, toast } from './hud.js';
+import { createInput, readInput } from './input.js';
 import { createAudio } from './audio.js';
-import { createInput, ACTION_INTERACT, ACTION_PAUSE, ACTION_MUTE, ACTION_RELOAD, ACTION_CONFIRM } from './input.js';
-import { createRenderer, SCREEN_TITLE, SCREEN_PLAY, SCREEN_PAUSED, SCREEN_BUSTED, SCREEN_OVER, SCREEN_WIN } from './render.js';
-import { createWorld, worldStep } from './world.js';
-import { createHud, hudUpdate, hudSetStatus } from './hud.js';
 import { stageShot } from './shots.js';
 
-const MAX_FRAME = 0.25;
-
 const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
+const seedParam = params.get('seed');
+const seed = seedParam !== null && seedParam !== '' ? seedParam : String(Date.now() % 100000);
+const shotName = params.get('shot');
 const selftest = params.get('selftest') === '1';
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() * 4294967296);
 
 const canvas = document.getElementById('game');
+const statusEl = document.getElementById('status');
+
+const world = createWorld(seed);
 const renderer = createRenderer(canvas);
-const world = createWorld(renderer.scene, createRandom(seed));
-world.camera = renderer.camera;
+const hud = initHud();
+const inputState = createInput(canvas);
 const audio = createAudio();
 world.audio = audio;
-const hud = createHud();
-const input = createInput(canvas);
+world.renderer = renderer;
 
-world.onEvent = (name, detail) => {
-  if (name === 'cash') setStatus(`Picked up $${detail.amount}`);
-  if (name === 'guardDown') setStatus('Guard down — +$50');
-  if (name === 'stole') setStatus('Car stolen — the cops noticed!');
-  if (name === 'pedHit') setStatus('You hit a pedestrian — wanted level up!');
-};
+// ---------------------------------------------------------------------------
+// Screens and menu buttons
+// ---------------------------------------------------------------------------
 
-let screen = SCREEN_TITLE;
-let best = readBest();
-let save = readSave();
-if (save) {
-  world.money = save.money || 0;
-  world.missions.index = Math.min(2, save.missionIndex || 0);
-  world.missions.stage = 0;
-  for (const drop of world.cashDrops) {
-    if (save.cashTaken && save.cashTaken.includes(drop.x + ',' + drop.z)) {
-      drop.taken = true; drop.mesh.visible = false;
-    }
-  }
+function setScreen(screen) {
+  world.screen = screen;
+  showScreen(hud, screen, world);
 }
 
-function readBest() {
-  try { return Number.parseInt(window.localStorage.getItem(BEST_KEY) ?? '0', 10) || 0; }
-  catch { return 0; }
-}
-function saveBest(value) {
-  try { window.localStorage.setItem(BEST_KEY, String(value)); } catch { /* private mode */ }
-}
-function readSave() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-}
-function writeSave() {
-  try {
-    window.localStorage.setItem(SAVE_KEY, JSON.stringify({
-      money: world.money,
-      missionIndex: world.missions.index,
-      cashTaken: world.cashDrops.filter((d) => d.taken).map((d) => d.x + ',' + d.z),
-      time: Math.round(world.time),
-    }));
-  } catch { /* private mode */ }
-}
-
-const overlay = {
-  title: document.getElementById('screen-title'),
-  paused: document.getElementById('screen-paused'),
-  busted: document.getElementById('screen-busted'),
-  over: document.getElementById('screen-over'),
-  win: document.getElementById('screen-win'),
-};
-const overlayText = {
-  titleBest: document.getElementById('title-best'),
-  titleContinue: document.getElementById('btn-continue'),
-  bustedText: document.getElementById('busted-text'),
-  overText: document.getElementById('over-text'),
-  winText: document.getElementById('win-text'),
-};
-
-function showOverlay(name) {
-  for (const key of Object.keys(overlay)) {
-    overlay[key].classList.toggle('hidden', key !== name);
-  }
-  if (name === 'title') {
-    overlayText.titleBest.textContent = best > 0 ? `Best haul: $${best.toLocaleString()}` : 'A new driver in Solmar City';
-    overlayText.titleContinue.style.display = save ? 'inline-block' : 'none';
-  }
-}
-
-function setStatus(text) {
-  hudSetStatus(hud, text);
-}
-
-function startGame(fresh) {
-  if (fresh) {
-    world.money = 0;
-    world.missions.index = 0;
-    world.missions.stage = 0;
-    world.missions.done = false;
-    for (const drop of world.cashDrops) { drop.taken = false; drop.mesh.visible = true; }
+function startGame(fromSave) {
+  audio.ensure();
+  audio.click();
+  if (fromSave) {
+    const save = loadSave();
+    if (save) applySave(world, save);
   }
   world.busted = false;
   world.gameOver = false;
-  world.player.health = 100;
-  world.player.magAmmo = 12;
-  world.player.reserveAmmo = 60;
-  world.wanted.stars = 0;
-  world.wanted.cops = [];
-  screen = SCREEN_PLAY;
-  showOverlay(null);
-  setStatus('Welcome to Solmar City. Follow the gold marker.');
-  audio.unlock();
-  audio.missionStart();
+  setScreen('play');
+  setStatus('Playing — W/A/S/D to move, E to enter a car, mouse to shoot.');
 }
 
-function respawnAfterBusted() {
-  const fine = Math.floor(world.money * 0.1);
-  world.money -= fine;
-  world.player.x = PLACES.hospital.x;
-  world.player.z = PLACES.hospital.z + 10;
-  world.player.heading = 0;
-  world.player.mesh.position.set(world.player.x, 0, world.player.z);
-  world.player.mesh.visible = true;
-  world.player.inCar = null;
-  world.player.health = 100;
-  world.wanted.stars = 0;
-  world.wanted.bustTimer = 0;
-  for (const cop of [...world.wanted.cops]) world.scene.remove(cop.mesh);
-  world.wanted.cops = [];
+function freshGame() {
+  // A brand-new run: reload the page on the same URL (same seed, same
+  // city, fresh everything). Rebuilding the world in place would leave the
+  // old meshes in the scene; a reload cannot leak state.
+  window.location.reload();
+}
+
+function wireButton(id, fn) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', fn);
+}
+
+wireButton('btn-start', () => startGame(false));
+wireButton('btn-continue', () => startGame(true));
+wireButton('btn-resume', () => {
+  audio.click();
+  setScreen('play');
+});
+wireButton('btn-restart', () => freshGame());
+wireButton('btn-win-restart', () => freshGame());
+wireButton('btn-busted-ok', () => {
+  audio.click();
   world.busted = false;
-  screen = SCREEN_PLAY;
-  showOverlay(null);
-  setStatus(`Busted! You paid a $${fine} fine. The cops let you walk.`);
-  writeSave();
+  setScreen('play');
+});
+wireButton('btn-over-retry', () => freshGame());
+wireButton('btn-win-roam', () => {
+  audio.click();
+  setScreen('play');
+});
+
+window.addEventListener('resize', () => resizeRenderer(renderer));
+window.addEventListener('pointerdown', () => audio.ensure(), { once: true });
+window.addEventListener('keydown', () => audio.ensure(), { once: true });
+// Alt-tabbing mid-chase pauses instead of letting the city run on without
+// you (and the cruisers catch up while you are gone).
+window.addEventListener('blur', () => {
+  if (world.screen === 'play') setScreen('paused');
+});
+
+function setStatus(text) {
+  if (statusEl) statusEl.textContent = text;
 }
 
-function placeCamera() {
-  const p = world.player;
-  renderer.updateCamera(STEP, { x: p.x, y: 0, z: p.z }, p.camYaw, p.camPitch, !!p.inCar);
-}
+// ---------------------------------------------------------------------------
+// Event drain: world events become sound, particles and toasts
+// ---------------------------------------------------------------------------
 
-function readInput() {
-  const drag = input.takeDrag();
-  const held = input.held;
-  return {
-    moveX: (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0),
-    moveY: (held.has('up') ? 1 : 0) - (held.has('down') ? 1 : 0),
-    run: held.has('run'),
-    throttle: (held.has('up') ? 1 : 0) - (held.has('down') ? 1 : 0),
-    steer: (held.has('right') ? 1 : 0) - (held.has('left') ? 1 : 0),
-    brake: held.has('brake'),
-    interact: input.takeAction(ACTION_INTERACT),
-    shoot: input.mouseDown || input.takeClick(),
-    reload: input.takeAction(ACTION_RELOAD),
-    camDX: drag.x, camDY: drag.y,
-  };
-}
-
-function draw() {
-  renderer.updateParticles(STEP);
-  renderer.setBeacon(
-    world.objectiveTarget ? world.objectiveTarget.x : 0,
-    world.objectiveTarget ? world.objectiveTarget.z : 0,
-    !!world.objectiveTarget && screen === SCREEN_PLAY,
-  );
-  placeCamera();
-  renderer.renderer.render(renderer.scene, renderer.camera);
-  hudUpdate(hud, world);
-}
-
-function resize() {
-  const w = window.innerWidth; const h = window.innerHeight;
-  renderer.resize(w, h);
-  hud.minimap.width = 180; hud.minimap.height = 180;
-}
-window.addEventListener('resize', resize);
-resize();
-
-function runShot(name) {
-  const scene = stageShot(name, world, placeCamera);
-  showOverlay(scene.screen === SCREEN_TITLE ? 'title' : null);
-  let painted = 0;
-  function paint() {
-    draw();
-    painted += 1;
-    if (painted < 3) requestAnimationFrame(paint);
-    else window.__shotReady = true;
+function drainEvents() {
+  if (world.events.length === 0) return;
+  const pos = playerPos(world);
+  for (const ev of world.events) {
+    switch (ev.name) {
+      case 'shot':
+        audio.shot();
+        if (renderer && world.renderer) {
+          const fx = Math.sin(world.player.heading);
+          const fz = Math.cos(world.player.heading);
+          spawnParticles(renderer, pos.x + fx * 1.2, 1.4, pos.z + fz * 1.2, 0xffc93c, 6, 6);
+        }
+        break;
+      case 'cash':
+        audio.pickup();
+        toast(hud, `+$${ev.detail.amount} street cash`);
+        spawnParticles(renderer, pos.x, 1, pos.z, 0x37c978, 10, 4);
+        break;
+      case 'mission-arrive':
+        toast(hud, 'Package is here — press E to collect it.', 3);
+        break;
+      case 'mission-complete':
+        audio.jingle();
+        toast(
+          hud,
+          ev.detail.bonus > 0
+            ? `Job done — $${ev.detail.reward} banked + $${ev.detail.bonus} clean getaway.`
+            : `Job done — $${ev.detail.reward} banked.`,
+          4,
+        );
+        spawnParticles(renderer, pos.x, 1.5, pos.z, 0xffc93c, 18, 7);
+        break;
+      case 'stole-car':
+        toast(hud, `You stole the ${ev.detail.car} — the cops noticed.`, 3);
+        break;
+      case 'busted':
+        audio.thud();
+        break;
+      case 'hurt':
+        audio.thud();
+        break;
+      case 'wanted':
+        if (ev.detail.stars >= 3) toast(hud, `Wanted level ${ev.detail.stars} — lose them!`, 3);
+        break;
+      default:
+        break;
+    }
   }
-  requestAnimationFrame(paint);
-  return scene;
+  world.events.length = 0;
 }
 
-// Headless self-test: drive the real rules through a scripted session and
-// report pass/fail + state in #status and window.__selftest.
-function runSelftest() {
-  const report = { errors: [], checks: {} };
-  window.addEventListener('error', (e) => report.errors.push(String(e.message || e.error)));
-  const p = world.player;
-  try {
-    // 1. Walk on foot.
-    const walkStartX = p.x; const walkStartZ = p.z;
-    for (let i = 0; i < 120; i += 1) {
-      worldStep(world, STEP, { moveX: 0, moveY: 1, run: false, throttle: 0, steer: 0, brake: false, interact: false, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    }
-    report.checks.walked = Math.hypot(p.x - walkStartX, p.z - walkStartZ) > 3;
-    // 2. Teleport next to the sedan and enter it.
-    p.x = world.homeCar.x + 2; p.z = world.homeCar.z + 2;
-    worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: true, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    report.checks.enteredCar = !!p.inCar;
-    // 3. Drive forward for 5 s.
-    const startX = p.x; const startZ = p.z;
-    for (let i = 0; i < 300; i += 1) {
-      worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 1, steer: 0, brake: false, interact: false, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    }
-    report.checks.drove = Math.hypot(p.x - startX, p.z - startZ) > 20;
-    report.checks.carSpeed = Math.abs(p.inCar ? p.inCar.speed : 0);
-    // 4. Exit, shoot once, check ammo drops and wanted rises.
-    worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: true, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    report.checks.exitedCar = !p.inCar;
-    placeCamera();
-    const ammoBefore = p.magAmmo;
-    for (let i = 0; i < 30; i += 1) {
-      worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: false, shoot: true, reload: false, camDX: 0, camDY: 0 });
-    }
-    report.checks.shotFired = p.magAmmo < ammoBefore;
-    report.checks.wantedAfterShot = world.wanted.stars;
-    report.checks.trafficMoving = world.traffic.some((c) => Math.abs(c.speed) > 2);
-    // 5. Mission 1 stage advance: drive the car to the diner door
-    // (just outside the diner walls, inside the 10 m objective radius).
-    // Park the traffic far away first so a passing car cannot shove us out.
-    if (p.inCar === null) {
-      p.x = world.homeCar.x + 2; p.z = world.homeCar.z + 2;
-      worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: true, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    }
-    for (const car of world.traffic) { car.x = 170; car.z = 170; car.speed = 0; }
-    // Teleport onto the diner's road approach (the mission marker itself).
-    p.inCar.x = PLACES.diner.approach.x; p.inCar.z = PLACES.diner.approach.z; p.inCar.speed = 0;
-    worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: false, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    report.checks.missionStage = world.missions.stage;
-    // 6. Collect the package on foot at the diner door (stage 2 -> 3).
-    worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: true, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    p.x = PLACES.diner.approach.x; p.z = PLACES.diner.approach.z;
-    worldStep(world, STEP, { moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false, interact: true, shoot: false, reload: false, camDX: 0, camDY: 0 });
-    report.checks.collectedStage = world.missions.stage;
-    report.checks.copsSpawned = world.wanted.cops.length;
-    report.checks.money = world.money;
-    report.checks.playerPos = [Math.round(p.x), Math.round(p.z)];
-    report.checks.wanted = world.wanted.stars;
-  } catch (e) {
-    report.errors.push(`selftest exception: ${e.message}`);
-  }
-  report.pass = report.errors.length === 0
-    && report.checks.walked && report.checks.enteredCar && report.checks.drove
-    && report.checks.exitedCar && report.checks.shotFired && report.checks.trafficMoving
-    && report.checks.missionStage === 2 && report.checks.collectedStage === 3;
-  window.__selftest = report;
-  setStatus(`SELFTEST ${report.pass ? 'PASS' : 'FAIL'} ${JSON.stringify(report.checks)} errors=${JSON.stringify(report.errors)}`);
-  document.title = `SELFTEST ${report.pass ? 'PASS' : 'FAIL'}`;
-  draw();
-  window.__shotReady = true;
-}
+// ---------------------------------------------------------------------------
+// The frame loop
+// ---------------------------------------------------------------------------
 
-function runGame() {
-  let last = performance.now();
-  let accumulator = 0;
-  let saveTimer = 0;
-  screen = SCREEN_TITLE;
-  showOverlay('title');
-  setStatus('SOLMAR HEAT — an original open-world crime game. Press Enter to start.');
+let lastTime = performance.now();
+let camOrbitUntil = 0;
 
-  document.getElementById('btn-start').addEventListener('click', () => startGame(true));
-  document.getElementById('btn-continue').addEventListener('click', () => startGame(false));
-  document.getElementById('btn-resume').addEventListener('click', () => { screen = SCREEN_PLAY; showOverlay(null); });
-  document.getElementById('btn-restart').addEventListener('click', () => startGame(true));
-  document.getElementById('btn-busted-ok').addEventListener('click', respawnAfterBusted);
-  document.getElementById('btn-over-retry').addEventListener('click', () => { world.gameOver = false; respawnAfterBusted(); });
-  document.getElementById('btn-win-roam').addEventListener('click', () => { screen = SCREEN_PLAY; showOverlay(null); });
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    const elapsed = Math.min(MAX_FRAME, (now - last) / 1000);
-    last = now;
-    if (input.takeAction(ACTION_MUTE)) {
-      const muted = audio.toggleMute();
-      setStatus(muted ? 'Sound off' : 'Sound on');
-    }
-    if (screen === SCREEN_PLAY && input.takeAction(ACTION_PAUSE)) {
-      screen = SCREEN_PAUSED;
-      showOverlay('paused');
-      setStatus('Paused');
-    } else if (screen === SCREEN_PAUSED && input.takeAction(ACTION_PAUSE)) {
-      screen = SCREEN_PLAY;
-      showOverlay(null);
-    }
-    if (screen === SCREEN_TITLE && input.takeAction(ACTION_CONFIRM)) startGame(!save);
-    if (screen === SCREEN_BUSTED && input.takeAction(ACTION_CONFIRM)) respawnAfterBusted();
-    if (screen === SCREEN_OVER && input.takeAction(ACTION_CONFIRM)) { world.gameOver = false; respawnAfterBusted(); }
-    if (screen === SCREEN_WIN && input.takeAction(ACTION_CONFIRM)) { screen = SCREEN_PLAY; showOverlay(null); }
-
-    if (screen === SCREEN_PLAY || screen === SCREEN_TITLE) {
-      accumulator += elapsed;
-      let steps = 0;
-      while (accumulator >= STEP && steps < 8) {
-        const gameInput = screen === SCREEN_PLAY ? readInput() : {
-          moveX: 0, moveY: 0, run: false, throttle: 0, steer: 0, brake: false,
-          interact: false, shoot: false, reload: false, camDX: 0, camDY: 0,
-        };
-        worldStep(world, STEP, gameInput);
-        accumulator -= STEP;
-        steps += 1;
-      }
-      if (steps === 8) accumulator = 0;
-      if (screen === SCREEN_TITLE) {
-        // Slow cinematic orbit behind the title screen.
-        world.player.camYaw += elapsed * 0.05;
-      }
-      audio.updateSiren(elapsed, world.wanted.stars);
-      if (world.busted) {
-        screen = SCREEN_BUSTED;
-        overlayText.bustedText.textContent = `The Solmar PD caught Dario. You lose 10% of your cash.`;
-        showOverlay('busted');
-        writeSave();
-      } else if (world.gameOver) {
-        screen = SCREEN_OVER;
-        overlayText.overText.textContent = `Dario went down in Solmar City. Cash kept: $${world.money.toLocaleString()}.`;
-        showOverlay('over');
-        writeSave();
-      } else if (world.missions.done && screen === SCREEN_PLAY && !world.winShown) {
-        world.winShown = true;
-        screen = SCREEN_WIN;
-        overlayText.winText.textContent = `All three jobs done. Dario owns Solmar City — $${world.money.toLocaleString()} in the pocket.`;
-        showOverlay('win');
-        if (world.money > best) { best = world.money; saveBest(best); }
-        writeSave();
-      }
-      saveTimer += elapsed;
-      if (saveTimer > 10) { saveTimer = 0; writeSave(); }
-    }
-    draw();
-  }
+function frame(now) {
   requestAnimationFrame(frame);
+  const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+  lastTime = now;
+
+  const inp = readInput(inputState);
+
+  // Menu keys work from any screen.
+  if (inp.confirm && world.screen === 'title') startGame(false);
+  if (inp.pause && (world.screen === 'play' || world.screen === 'paused')) {
+    setScreen(world.screen === 'play' ? 'paused' : 'play');
+    audio.click();
+  }
+  if (inp.mute) {
+    world.player.muted = !world.player.muted;
+    audio.setMuted(world.player.muted);
+  }
+  // The horn: a blast that startles nearby traffic (see vehicles.js).
+  if (inp.horn && world.screen === 'play') {
+    world.hornAt = world.time;
+    audio.horn();
+  }
+
+  // The mouse orbits the camera; the view drifts back behind the heading
+  // a couple of seconds after the last drag.
+  if (inp.camDX || inp.camDY) camOrbitUntil = now + 2000;
+  if (now > camOrbitUntil && world.screen === 'play') {
+    const p = world.player;
+    const diff = p.heading - p.camYaw;
+    const wrapped = ((diff + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI;
+    p.camYaw += wrapped * Math.min(1, dt * 1.5);
+  }
+
+  if (world.screen !== 'paused') {
+    // Play simulates fully; every other screen still runs the ambient
+    // city (traffic and pedestrians) behind its overlay.
+    worldStep(world, dt, inp);
+  }
+
+  drainEvents();
+  audio.setEngine(world.player.inCar ? world.player.car.speed : 0, world.player.inCar);
+  audio.setSiren(world.wanted.stars);
+  renderWorld(renderer, world);
+  updateHud(hud, world);
 }
 
-// Debug handle for the headless play-test.
+// ---------------------------------------------------------------------------
+// The self-test (?selftest=1): a scripted headless session.
+//
+// Fixed 1/60 s steps, exactly as the contract describes:
+//   1. walk forward 120 steps (must move > 3 m)
+//   2. teleport beside the home sedan, interact once (must be in the car)
+//   3. drive 300 steps at full throttle (must move > 20 m)
+//   4. exit, shoot 30 steps (ammo must drop, wanted must reach 5,
+//      some traffic must be moving)
+//   5. re-enter if needed, park traffic far away, teleport the car onto
+//      the mission-0 objective, one step (mission stage must become 2)
+//   6. exit, teleport the player onto the objective, interact once
+//      (stage must become 3), record cops, money, position, wanted.
+// Pass = no errors, and walked, enteredCar, drove, exitedCar, shotFired,
+// trafficMoving, missionStage === 2 and collectedStage === 3.
+// ---------------------------------------------------------------------------
+
+function runSelfTest() {
+  const errors = [];
+  const checks = {};
+  const step = (input) => worldStep(world, STEP, input);
+  const blank = () => ({
+    moveX: 0,
+    moveY: 0,
+    run: false,
+    throttle: 0,
+    steer: 0,
+    brake: false,
+    interact: false,
+    shoot: false,
+    reload: false,
+    camDX: 0,
+    camDY: 0,
+  });
+
+  world.screen = 'play';
+  try {
+    // 1. Walk forward for two seconds.
+    const startX = world.player.x;
+    const startZ = world.player.z;
+    for (let i = 0; i < 120; i++) step({ ...blank(), moveY: 1 });
+    checks.walked = Math.hypot(world.player.x - startX, world.player.z - startZ) > 3;
+
+    // 2. Teleport beside the home sedan and climb in.
+    world.player.x = world.homeCar.x + 2;
+    world.player.z = world.homeCar.z + 2;
+    step({ ...blank(), interact: true });
+    checks.enteredCar = world.player.inCar === true;
+
+    // 3. Drive at full throttle for five seconds.
+    const carStartX = world.homeCar.x;
+    const carStartZ = world.homeCar.z;
+    for (let i = 0; i < 300; i++) step({ ...blank(), throttle: 1 });
+    checks.drove = Math.hypot(world.homeCar.x - carStartX, world.homeCar.z - carStartZ) > 20;
+    checks.carSpeed = Math.abs(world.homeCar.speed);
+
+    // 4. Step out and shoot for half a second.
+    step({ ...blank(), interact: true });
+    checks.exitedCar = world.player.inCar === false;
+    const ammoBefore = world.player.magAmmo;
+    for (let i = 0; i < 30; i++) step({ ...blank(), shoot: true });
+    checks.shotFired = world.player.magAmmo < ammoBefore;
+    checks.wantedAfterShot = world.wanted.stars;
+    checks.trafficMoving = world.traffic.some((car) => Math.abs(car.speed) > 2);
+
+    // 5. Back in the sedan, traffic parked out of the way, car on the objective.
+    if (!world.player.inCar) {
+      world.player.x = world.homeCar.x + 2;
+      world.player.z = world.homeCar.z + 2;
+      step({ ...blank(), interact: true });
+    }
+    for (const car of world.traffic) {
+      car.x = 170;
+      car.z = 170;
+      car.speed = 0;
+    }
+    world.homeCar.x = world.objective.x;
+    world.homeCar.z = world.objective.z;
+    world.homeCar.speed = 0;
+    step(blank());
+    checks.missionStage = world.missions.stage;
+
+    // 6. On foot at the objective, collect the package.
+    step({ ...blank(), interact: true });
+    world.player.x = world.objective.x;
+    world.player.z = world.objective.z;
+    step({ ...blank(), interact: true });
+    checks.collectedStage = world.missions.stage;
+
+    checks.copsSpawned = world.wanted.cops.length;
+    checks.money = world.money;
+    checks.playerPos = [Math.round(world.player.x), Math.round(world.player.z)];
+    checks.wanted = world.wanted.stars;
+  } catch (e) {
+    errors.push(String((e && e.message) || e));
+  }
+
+  const pass =
+    errors.length === 0 &&
+    checks.walked === true &&
+    checks.enteredCar === true &&
+    checks.drove === true &&
+    checks.exitedCar === true &&
+    checks.shotFired === true &&
+    checks.trafficMoving === true &&
+    checks.missionStage === 2 &&
+    checks.collectedStage === 3;
+
+  const report = { errors, checks, pass };
+  window.__selftest = report;
+  const label = pass ? 'SELFTEST PASS' : 'SELFTEST FAIL';
+  setStatus(`${label} ${JSON.stringify(checks)} errors=${JSON.stringify(errors)}`);
+  document.title = label;
+  renderWorld(renderer, world);
+  window.__shotReady = true;
+  return report;
+}
+
+// ---------------------------------------------------------------------------
+// Public handle and boot
+// ---------------------------------------------------------------------------
+
 window.__game = {
   world,
-  step: (input) => worldStep(world, STEP, input),
+  step(given) {
+    const inp = given || readInput(inputState);
+    worldStep(world, STEP, inp);
+    renderWorld(renderer, world);
+  },
   get state() {
+    const pos = playerPos(world);
     return {
-      screen,
+      screen: world.screen,
       money: world.money,
       wanted: world.wanted.stars,
       mission: world.missions.index,
       stage: world.missions.stage,
-      health: world.player.health,
+      health: Math.ceil(world.player.health),
       ammo: world.player.magAmmo,
-      inCar: !!world.player.inCar,
+      inCar: world.player.inCar,
       cops: world.wanted.cops.length,
       guards: world.guards.length,
-      pos: [Math.round(world.player.x), Math.round(world.player.z)],
+      pos: [Math.round(pos.x), Math.round(pos.z)],
     };
   },
 };
 
+showScreen(hud, 'title', world);
+setStatus('SOLMAR HEAT — press Enter or click Start.');
+
 if (selftest) {
-  runSelftest();
-} else if (shot) {
-  runShot(shot);
+  runSelfTest();
+} else if (shotName) {
+  const screen = stageShot(world, shotName);
+  setScreen(screen);
+  snapCamera(renderer, world);
+  renderWorld(renderer, world);
+  renderWorld(renderer, world);
+  renderWorld(renderer, world);
+  window.__shotReady = true;
 } else {
-  runGame();
+  requestAnimationFrame(frame);
 }
