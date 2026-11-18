@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Pedestrians — sidewalk walkers who stroll the blocks, cross at corners,
 // and flee when the player speeds at them or fires a shot.
 import { ROAD_HALF, BLOCK, GRID, CITY_HALF } from './config.js';

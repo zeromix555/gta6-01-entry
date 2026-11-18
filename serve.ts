@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // A tiny static server for game/ (Node 22, standard library only), so the
 // entry can be played locally without a build step:
 //   node serve.ts [--port 8080]

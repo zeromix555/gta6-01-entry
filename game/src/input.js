@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Keyboard + mouse input. WASD moves, mouse drag orbits the camera,
 // click shoots, E interacts, Shift runs, Space handbrakes, P pauses, M mutes, R reloads.
 export const ACTION_INTERACT = 'interact';

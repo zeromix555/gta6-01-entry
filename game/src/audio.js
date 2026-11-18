@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Synthesised sound effects — WebAudio only, no audio files.
 // Engine hum, police siren, gunshots, pickup chimes, mission stings.
 export function createAudio() {

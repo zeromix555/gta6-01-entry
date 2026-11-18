@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // The player — Dario Cruz. On foot (WASD + mouse orbit, Shift to run,
 // click to fire the pistol) and behind the wheel (W/S throttle, A/D steer,
 // Space handbrake, E to get in/out and to steal).

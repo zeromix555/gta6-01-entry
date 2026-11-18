@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // World — owns all game state and advances it one fixed step at a time:
 // player, traffic, pedestrians, police, guards, missions, cash, wanted heat,
 // busted/game-over, and the objective marker. Pure logic; rendering lives

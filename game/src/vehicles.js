@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Vehicles — car mesh factory, parked cars, and traffic AI that drives the
 // road grid, slows for the car ahead, and turns at intersections.
 import { CAR, PAINTS, BLOCK, ROAD_HALF, CITY_HALF } from './config.js';

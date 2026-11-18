@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Solmar City — builds the 3D city: ground, road grid, buildings with lit
 // windows, palms, beach and sea, street props. Also owns the collision boxes
 // (axis-aligned) and the road graph traffic drives on.

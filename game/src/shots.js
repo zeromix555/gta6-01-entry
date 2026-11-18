@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Staged screenshot scenes behind ?shot=chase|street|mission|start.
 // Each scene plays the real rules forward from a fresh world for a fixed
 // number of steps, steered by a scripted autopilot, so the frame is what a

@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // Wanted system + police. Stars rise for crimes; police cars spawn at the
 // map edge and chase the player, ramming on foot or in a car. Lose them and
 // the heat cools off one star at a time. Get caught and you are BUSTED.

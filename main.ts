@@ -1,4 +1,4 @@
-// SOLMAR HEAT v2
+// SOLMAR HEAT v3
 // SOLMAR HEAT — a make.fun gta6-01 entry (Node 22, standard library only).
 // The game is plain static files under game/ (three.js vendored as a minified
 // build, everything else authored for this entry) and plays offline in a

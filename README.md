@@ -4,7 +4,7 @@
 [![reward](https://make.fun/badge/gta6-01/zeromix555/gta6-01-entry/reward.svg)](https://make.fun/bounty/gta6-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-01)
 [![Invite: jwef5djp](https://make.fun/badge/invite-jwef5djp.svg)](https://make.fun/r/jwef5djp)
 
-*v2 resubmission — every snapshot file rewritten in a recorded session.*
+*v3 resubmission — every snapshot file rewritten in a recorded session.*
 
 # SOLMAR HEAT — an original open-world crime game
 
