@@ -1,3 +1,4 @@
+// SOLMAR HEAT v2
 // Seeded random number generator (mulberry32) so ?seed=N replays the same city.
 export function createRandom(seed) {
   let a = seed >>> 0;

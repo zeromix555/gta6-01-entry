@@ -1,3 +1,4 @@
+// SOLMAR HEAT v2
 // Renderer — three.js setup, third-person follow camera, objective beacon,
 // and lightweight particle bursts (muzzle flash, impacts, pickup sparkles).
 import { CITY_HALF } from './config.js';

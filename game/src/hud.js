@@ -1,3 +1,4 @@
+// SOLMAR HEAT v2
 // HUD — DOM overlay: wanted stars, cash, health, ammo, objective banner,
 // message feed, speed, and a live canvas minimap of Solmar City.
 import { CITY_HALF, BLOCK, ROAD_HALF, GRID } from './config.js';

@@ -1,3 +1,4 @@
+// SOLMAR HEAT v2
 // SOLMAR HEAT — boot and the one loop.
 // Input is read every frame, the world advances in fixed 1/60 s steps, and
 // the renderer paints what is there. Screens: title, play, paused, busted,

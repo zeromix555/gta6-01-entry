@@ -1,3 +1,4 @@
+// SOLMAR HEAT v2
 // SOLMAR HEAT — configuration and world data.
 // Original sun-soaked coastal city "Solmar City", original characters and story.
 // Nothing here comes from any commercial game.
